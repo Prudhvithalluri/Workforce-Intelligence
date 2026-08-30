@@ -31,8 +31,18 @@ def _session(state):
 
 
 def _page(state):
-    logger.debug("agent_page_requested step=%s", state.get("current_step"))
-    return _session(state).active_page()
+    session = _session(state)
+    page = session.active_page()
+    # Make it explicit in the logs which tab (main page vs. the tab opened
+    # by Time & Attendance) every check/action actually runs against.
+    which = "attendance_page" if page is session.attendance_page else "main_page"
+    logger.debug(
+        "agent_page_requested step=%s using=%s url=%s",
+        state.get("current_step"),
+        which,
+        getattr(page, "url", None),
+    )
+    return page
 
 
 def _page_open(page):
@@ -133,13 +143,33 @@ async def inspect(state):
     logger.info("agent_step_started step=inspect")
     session = _session(state)
     page = _page(state)
+
+    # Log which tab (main login page vs. the tab Time & Attendance opened)
+    # every check in this inspect() call is running against, so it's
+    # obvious from the logs whether the "remaining" checks (Punch In,
+    # Punch Out, Absence Management, etc.) are hitting the new page.
+    which_page = "attendance_page" if page is session.attendance_page else "main_page"
+    logger.info(
+        "agent_step_inspecting using=%s url=%s",
+        which_page,
+        page.url,
+    )
+
     snapshot = await page_snapshot(page)
     requested_checks = set(_inspection_checks(state))
 
     async def check(name, operation):
         if name not in requested_checks:
             return False
-        return await operation()
+        # Most checks (e.g. `visible(...)`) are coroutine functions and must
+        # be awaited. `_page_open` (and any other plain/sync check) returns
+        # a plain bool immediately -- awaiting that raises
+        # "TypeError: object bool can't be used in 'await' expression".
+        # Support both without requiring every check to be async.
+        result = operation()
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result
 
     async def nav_check(text):
         return await _nav_visible(page, text)
@@ -547,6 +577,25 @@ async def click_time_attendance(state):
     session = _session(state)
     page = session.page
 
+    # --------------------------------------------------------
+    # Defense against duplicate tabs.
+    #
+    # If a previous attempt already opened a Time & Attendance tab (e.g. a
+    # retry after a transient/verification error), reuse or close it instead
+    # of clicking again and letting the target site open yet another tab.
+    # Each click on this nav link opens a NEW popup on this site, so retrying
+    # the click without cleaning up the old tab is what caused 3-4 tabs to
+    # pile up with different URLs.
+    # --------------------------------------------------------
+    existing = session.attendance_page
+    if existing is not None and existing is not page and not existing.is_closed():
+        try:
+            await existing.close()
+            logger.info("Time & Attendance: closed a stale tab before retrying")
+        except Exception:
+            logger.exception("Time & Attendance: failed to close stale tab")
+    session.attendance_page = None
+
     locator = (
         page.locator(NAV_SELECTORS["time_attendance"])
         .filter(has_text=re.compile(r"^\s*Time & Attendance\s*$"))
@@ -574,6 +623,51 @@ async def click_time_attendance(state):
     except Exception:
         pass
 
+    # --------------------------------------------------------
+    # Catch the FINAL url, not an intermediate redirect hop.
+    #
+    # This target site's Time & Attendance tab redirects through more than
+    # one URL before landing on its real destination (seen in production:
+    # .../V7/ess/dashboard -> .../infoservices.securtime.adp.com/ng/dashboard).
+    # "domcontentloaded" only guarantees the FIRST hop finished, so capturing
+    # attendance_page.url right after it can grab a transitional URL.
+    #
+    # Poll the URL until it stops changing (settles) or the action timeout
+    # is hit, so downstream steps (Punch In / Punch Out / Absence
+    # Management) see the real, final page.
+    # --------------------------------------------------------
+    settle_check_ms = 400
+    stable_reads_required = 2
+    elapsed_ms = 0
+    stable_reads = 0
+    last_url = attendance_page.url
+
+    while (
+        stable_reads < stable_reads_required
+        and elapsed_ms < settings.ACTION_TIMEOUT_MS
+    ):
+        await attendance_page.wait_for_timeout(settle_check_ms)
+        elapsed_ms += settle_check_ms
+        current_url = attendance_page.url
+        if current_url == last_url:
+            stable_reads += 1
+        else:
+            logger.info(
+                "Time & Attendance: URL changed mid-redirect %s -> %s",
+                last_url,
+                current_url,
+            )
+            stable_reads = 0
+            last_url = current_url
+
+    logger.info(
+        "Time & Attendance: settled on URL=%s (waited %sms)",
+        last_url,
+        elapsed_ms,
+    )
+
+    # Give the final page a moment to finish rendering its own content
+    # (nav links, Punch In / absence management buttons, etc.).
     await attendance_page.wait_for_timeout(settings.ATTENDANCE_RENDER_WAIT_MS)
 
     return {

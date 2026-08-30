@@ -3,6 +3,18 @@ import logging
 import sys
 import time
 
+
+# =========================================================
+# WINDOWS + PLAYWRIGHT FIX
+# =========================================================
+#
+# Playwright's async API starts a browser subprocess.
+# On Windows, subprocess support requires the Proactor
+# event loop.
+#
+# This must be configured before FastAPI/Uvicorn starts.
+# =========================================================
+
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(
         asyncio.WindowsProactorEventLoopPolicy()

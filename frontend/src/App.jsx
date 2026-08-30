@@ -113,7 +113,7 @@ function PinInput({ value, onChange, label = "Enter 4-Digit PIN", onEnter }) {
     </div>
   );
 }
-function OtpModal({ onSubmit, busy, error }) {
+function OtpModal({ onSubmit, busy, error, progressStep, progressMessage }) {
   const [otp, setOtp] = useState("");
 
   return (
@@ -159,10 +159,20 @@ function OtpModal({ onSubmit, busy, error }) {
         </button>
 
         {busy && (
-          <p className="pin-hint">
-            This is only needed once per session — hang tight while we
-            finish the request.
-          </p>
+          <>
+            {/* Live progress from the backend while the whole operation
+                (login -> click_me -> time_attendance -> punch in/out ->
+                confirm) keeps running after OTP is accepted. Without this
+                the modal looked frozen for 30-60+ seconds. */}
+            <div className="otp-progress">
+              <Loader2 size={16} className="spin" />
+              <span>{humanize(progressMessage) || "Continuing automation..."}</span>
+            </div>
+            <p className="pin-hint">
+              This is only needed once per session — hang tight while we
+              finish the request.
+            </p>
+          </>
         )}
       </div>
     </div>
@@ -263,6 +273,25 @@ function WfhModal({ sessionId, onClose, onSuccess }) {
         reason: reason.trim(),
         location,
       });
+
+      const resultStatus = result?.status || result?.details?.status;
+      const requestFailed = resultStatus === "failed" || resultStatus === "error";
+
+      if (requestFailed) {
+        // The backend ran the automation and it genuinely failed (e.g. a
+        // selector timeout on the target site). This comes back as a
+        // normal response, not a thrown error, so it must be checked
+        // explicitly. Keep this form open with everything the user typed
+        // still in place, and show the failure right here instead of
+        // silently dismissing to the dashboard and losing their input.
+        setError(
+          result?.message ||
+            result?.details?.message ||
+            "WFH request failed. Please try again."
+        );
+        setLocationStatus("Location captured, but the request failed.");
+        return;
+      }
 
       onSuccess(result);
     } catch (e) {
@@ -847,7 +876,14 @@ function Dashboard({ sessionId, username, onLogout }) {
   };
 
   useEffect(() => {
-    if (!sessionId || !busyAction || !api.getSessionStatus) return;
+    // Keep polling live progress not only while the initial action call is
+    // in flight (busyAction), but for the ENTIRE duration of the OTP-verify
+    // call too (otpBusy). The backend keeps running the whole operation
+    // (click_me -> time_attendance -> punch_in/out -> confirm) inside that
+    // single /verify-otp request, which can take 30-60+ seconds. Without
+    // polling here, the OTP modal just sat on a static "Verifying..."
+    // message the whole time with no real feedback.
+    if (!sessionId || (!busyAction && !otpBusy) || !api.getSessionStatus) return;
 
     let stopped = false;
 
@@ -912,7 +948,7 @@ function Dashboard({ sessionId, username, onLogout }) {
       stopped = true;
       clearInterval(interval);
     };
-  }, [sessionId, busyAction]);
+  }, [sessionId, busyAction, otpBusy]);
 
   const logout = () => {
     localStorage.removeItem("attendease_session");
@@ -1059,6 +1095,12 @@ function Dashboard({ sessionId, username, onLogout }) {
               result?.message || "WFH request submitted"
             );
 
+            // WfhModal only calls onSuccess for a real completion or a
+            // hand-off to the OTP modal (see WfhModal.submit) -- a
+            // backend-reported failure is handled inside WfhModal itself
+            // so the error is visible and the form stays open. By the
+            // time we get here, the form step is genuinely done, so
+            // dismiss it and reveal the dashboard underneath.
             setWfhOpen(false);
             handleAutomationResult(result, "work_from_home");
           }}
@@ -1070,6 +1112,8 @@ function Dashboard({ sessionId, username, onLogout }) {
           onSubmit={verifyAutomationOtp}
           busy={otpBusy}
           error={otpError}
+          progressStep={automationStep}
+          progressMessage={automationMessage}
         />
       )}
     </div>
