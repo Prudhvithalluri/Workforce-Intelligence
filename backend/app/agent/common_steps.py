@@ -11,6 +11,7 @@ from browser.helpers import (
     LOGIN_SELECTORS,
     NAV_SELECTORS,
     WFH_SELECTORS,
+    capture_screenshot,
     page_snapshot,
     visible,
 )
@@ -135,6 +136,19 @@ async def _visible_by_label(page, label: str, timeout: int = 1500) -> bool:
         return False
 
 
+async def _wfh_dropdown_visible(page, timeout: int = 10000) -> bool:
+    """
+    Check for the "Select Type" dropdown trigger. Prefers the real
+    custom-element trigger-button (select_type_trigger); falls back to
+    the accessible-role match (request_type_dropdown) only if that
+    isn't found, since the role match can silently miss a closed
+    shadow root.
+    """
+    if await visible(page, WFH_SELECTORS["select_type_trigger"], timeout=timeout):
+        return True
+    return await visible(page, WFH_SELECTORS["request_type_dropdown"], timeout=timeout)
+
+
 # ---------------------------------------------------------
 # Deterministic inspection
 # ---------------------------------------------------------
@@ -208,15 +222,19 @@ async def inspect(state):
             page, WFH_SELECTORS["special_requests"]
         ),
         "apply_visible": lambda: visible(page, WFH_SELECTORS["apply"]),
-        "wfh_dropdown_visible": lambda: visible(
-            page, WFH_SELECTORS["request_type_dropdown"]
+        "wfh_dropdown_visible": lambda: _wfh_dropdown_visible(page, timeout=10000),
+        "reason_button_visible": lambda: visible(
+            page, WFH_SELECTORS["reason_button"], timeout=10000
         ),
-        "reason_button_visible": lambda: visible(page, WFH_SELECTORS["reason_button"]),
-        "others_visible": lambda: visible(page, WFH_SELECTORS["others_option"]),
+        "others_visible": lambda: visible(
+            page, WFH_SELECTORS["others_option"], timeout=10000
+        ),
         "reason_textbox_visible": lambda: visible(
-            page, WFH_SELECTORS["reason_textbox"]
+            page, WFH_SELECTORS["reason_textbox"], timeout=10000
         ),
-        "wfh_submit_visible": lambda: visible(page, WFH_SELECTORS["submit"]),
+        "wfh_submit_visible": lambda: visible(
+            page, WFH_SELECTORS["submit"], timeout=10000
+        ),
     }
 
     names = list(requested_checks & check_operations.keys())
@@ -928,11 +946,38 @@ async def click_apply(state):
     }
 
 
-async def select_work_from_home(state):
-    page = _page(state)
+async def _open_select_type_dropdown(page):
+    """
+    Open the "Select Type" dropdown so the Work From Home option becomes
+    visible. This is a custom <sdf-select-simple label="Select Type">
+    component; the real clickable element is the nested div.trigger-button,
+    not a plain accessible button. Falls back to the previous role-based
+    "Select one..." match if that structure isn't found, so this can't
+    regress the previously-working behavior.
+    """
+
+    try:
+        trigger = page.locator(WFH_SELECTORS["select_type_trigger"]).first
+
+        if await trigger.count() > 0:
+            await trigger.wait_for(
+                state="visible", timeout=settings.ACTION_TIMEOUT_MS
+            )
+            await trigger.click(timeout=10000)
+            logger.debug("select_type_dropdown_opened_via=trigger_button")
+            return
+    except Exception:
+        logger.debug("select_type_trigger_button_not_found")
+
     dropdown = page.get_by_role("button", name="Select one...").first
     await dropdown.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
     await dropdown.click(timeout=10000)
+    logger.debug("select_type_dropdown_opened_via=role_fallback")
+
+
+async def select_work_from_home(state):
+    page = _page(state)
+    await _open_select_type_dropdown(page)
 
     option = page.get_by_role("option", name="Work From Home").first
     await option.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
@@ -946,36 +991,91 @@ async def select_work_from_home(state):
 
 
 def _normalise_date_for_input(value: str, input_type: str) -> str:
-    """Use ISO for HTML date inputs; preserve dd/mm/yyyy for text inputs."""
     value = value.strip()
-    if input_type != "date":
-        return value
+
+    year = month = day = None
 
     if re.fullmatch(r"\d{2}/\d{2}/\d{4}", value):
         day, month, year = value.split("/")
+    elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        year, month, day = value.split("-")
+    elif re.fullmatch(r"\d{4}/\d{2}/\d{2}", value):
+        year, month, day = value.split("/")
+
+    if year is None:
+        # Unknown/unexpected format -- leave untouched rather than guess.
+        return value
+
+    if input_type == "date":
         return f"{year}-{month}-{day}"
 
-    return value
+    return f"{year}/{month}/{day}"
 
 
-async def _fill_date(page, index: int, value: str):
-    inputs = page.locator(WFH_SELECTORS["date_input"])
-    locator = inputs.nth(index)
+async def _locate_date_input(page, index: int, label_text: str):
+    """
+    Find a date input by its nearby label text first (e.g. "Start Date",
+    "End Date"). Falls back to the plain positional nth(index) match
+    within WFH_SELECTORS["date_input"] -- the approach already proven
+    to work against the live site -- if no labeled match is found.
+    """
+
+    try:
+        candidate = page.get_by_label(label_text, exact=False)
+        if await candidate.count() > 0:
+            logger.debug("date_input_matched_by_label label=%s", label_text)
+            return candidate.first
+    except Exception:
+        pass
+
+    try:
+        xpath = (
+            "xpath=//*[contains(normalize-space(string(.)), "
+            f'"{label_text}")]/following::input[@name="sdf-input"][1]'
+        )
+        candidate = page.locator(xpath)
+        if await candidate.count() > 0:
+            logger.debug("date_input_matched_by_nearby_text label=%s", label_text)
+            return candidate.first
+    except Exception:
+        pass
+
+    logger.debug("date_input_fallback_to_index index=%s label=%s", index, label_text)
+    return page.locator(WFH_SELECTORS["date_input"]).nth(index)
+
+
+async def _fill_date(page, index: int, value: str, label_text: str):
+    locator = await _locate_date_input(page, index, label_text)
     await locator.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
 
     input_type = await locator.get_attribute("type") or "text"
     formatted = _normalise_date_for_input(value, input_type)
     await locator.fill(formatted)
 
+    # .fill() only sets the DOM value -- it doesn't guarantee the site's
+    # own component state is updated. If nothing blurs this field, a
+    # later blur elsewhere on the page (e.g. leaving the description
+    # field) can trigger the site's validation/re-render and wipe out
+    # a date that was never actually "committed". Force a real change +
+    # blur here so the value sticks before we move on to later steps.
+    try:
+        await locator.evaluate(
+            "el => el.dispatchEvent(new Event('change', { bubbles: true }))"
+        )
+        await locator.evaluate("el => el.blur()")
+    except Exception:
+        pass
+    await page.wait_for_timeout(300)
+
     actual = await locator.input_value()
     if not actual:
         raise RuntimeError("Date value was not accepted by the target site")
 
-
 async def enter_start_date(state):
     page = _page(state)
-    await _fill_date(page, 1, state["start_date"])
+    await _fill_date(page, 1, state["start_date"], "Start Date")
     await page.wait_for_timeout(settings.WFH_WAIT_MS)
+    await page.wait_for_timeout(2000)  # extra 2s buffer so End Date field is ready
     return {
         "current_step": "start_date_entered",
         "action_result": "start_date_entered",
@@ -984,7 +1084,7 @@ async def enter_start_date(state):
 
 async def enter_end_date(state):
     page = _page(state)
-    await _fill_date(page, 2, state["end_date"])
+    await _fill_date(page, 2, state["end_date"], "End Date")
     await page.wait_for_timeout(settings.WFH_WAIT_MS)
     return {
         "current_step": "end_date_entered",
@@ -1023,7 +1123,24 @@ async def enter_wfh_reason(state):
     locator = page.get_by_role("textbox", name="Enter Reason").first
     await locator.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
     await locator.fill(state["reason"])
+
+    # Tab alone doesn't reliably move focus fully out of this custom
+    # shadow-DOM textbox, so the site's own validation (which enables the
+    # Submit button) never fires. Force a real blur on the actual focused
+    # element, then also click elsewhere on the page as a fallback, to make
+    # sure focus genuinely leaves the description field.
+    try:
+        await locator.evaluate("el => el.blur()")
+    except Exception:
+        pass
+
     await locator.press("Tab")
+
+    try:
+        await page.locator("body").click(position={"x": 5, "y": 5}, timeout=2000)
+    except Exception:
+        pass
+
     await page.wait_for_timeout(settings.WFH_WAIT_MS)
 
     return {
@@ -1031,11 +1148,42 @@ async def enter_wfh_reason(state):
         "action_result": "wfh_reason_entered",
     }
 
-
 async def submit_wfh(state):
     page = _page(state)
+
+    # All WFH fields (type, dates, reason) are filled by this point —
+    # capture the form right before Submit is clicked.
+    await capture_screenshot(page, state.get("session_id"), "wfh_before_submit")
+
     locator = page.locator(WFH_SELECTORS["submit"]).first
     await locator.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
+
+    # The Submit button starts out disabled (aria-disabled="true") until
+    # the site's own client-side validation clears. A plain .click() just
+    # retries against a disabled element until it times out. Poll for it
+    # to actually become enabled first.
+    enabled = False
+    poll_deadline_ms = settings.ACTION_TIMEOUT_MS
+    waited_ms = 0
+    while waited_ms < poll_deadline_ms:
+        aria_disabled = await locator.get_attribute("aria-disabled")
+        disabled_attr = await locator.get_attribute("disabled")
+        class_attr = await locator.get_attribute("class") or ""
+        has_disabled_class = "disabled" in class_attr.split()
+        if aria_disabled != "true" and disabled_attr is None and not has_disabled_class:
+            enabled = True
+            break
+        await page.wait_for_timeout(300)
+        waited_ms += 300
+
+    if not enabled:
+        await capture_screenshot(page, state.get("session_id"), "wfh_submit_still_disabled")
+        raise RuntimeError(
+            "WFH Submit button stayed disabled -- one of the fields "
+            "(start date, end date, reason, or dropdown selection) was "
+            "likely not registered by the site's form validation."
+        )
+
     await locator.click(timeout=10000)
     await page.wait_for_timeout(settings.WFH_WAIT_MS)
 
@@ -1052,8 +1200,6 @@ async def submit_wfh(state):
         },
         "action_result": "wfh_submit_clicked",
     }
-
-
 # ---------------------------------------------------------
 # Action registry
 # ---------------------------------------------------------
@@ -1108,5 +1254,3 @@ async def _verify_candidate_step(state, candidate_step: str) -> tuple[bool, dict
 
     logger.info("agent_step_verified step=%s verified=%s", candidate_step, ok)
     return ok, inspection
-
-

@@ -115,6 +115,18 @@ class Settings(BaseSettings):
 
 
     # =====================================================
+    # DEBUG SCREENSHOTS
+    # =====================================================
+    #
+    # Directory where debug screenshots (e.g. the WFH form
+    # right before Submit is clicked) are saved. Relative
+    # paths are resolved against BASE_DIR.
+    # =====================================================
+
+    SCREENSHOT_DIR: str = str(BASE_DIR / "debug_screenshots")
+
+
+    # =====================================================
     # AGENT RECOVERY
     # =====================================================
 
@@ -133,7 +145,7 @@ class Settings(BaseSettings):
 
     PUNCH_CONFIRM_WAIT_MS: int = 2000
 
-    WFH_WAIT_MS: int = 3000
+    WFH_WAIT_MS: int = 6000
 
     ACTION_TIMEOUT_MS: int = 30000
 
@@ -159,6 +171,26 @@ class Settings(BaseSettings):
 
         path = Path(
             self.USERS_JSON_PATH
+        )
+
+        if not path.is_absolute():
+
+            path = BASE_DIR / path
+
+        return path.resolve()
+
+
+    # =====================================================
+    # SCREENSHOT DIR PATH
+    # =====================================================
+
+    @property
+    def screenshot_dir_path(self) -> Path:
+
+        logger.debug("resolving_screenshot_dir configured=%s", bool(self.SCREENSHOT_DIR))
+
+        path = Path(
+            self.SCREENSHOT_DIR
         )
 
         if not path.is_absolute():
