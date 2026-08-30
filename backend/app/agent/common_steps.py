@@ -1150,18 +1150,10 @@ async def enter_wfh_reason(state):
 
 async def submit_wfh(state):
     page = _page(state)
-
-    # All WFH fields (type, dates, reason) are filled by this point —
-    # capture the form right before Submit is clicked.
     await capture_screenshot(page, state.get("session_id"), "wfh_before_submit")
 
     locator = page.locator(WFH_SELECTORS["submit"]).first
     await locator.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
-
-    # The Submit button starts out disabled (aria-disabled="true") until
-    # the site's own client-side validation clears. A plain .click() just
-    # retries against a disabled element until it times out. Poll for it
-    # to actually become enabled first.
     enabled = False
     poll_deadline_ms = settings.ACTION_TIMEOUT_MS
     waited_ms = 0
@@ -1184,9 +1176,11 @@ async def submit_wfh(state):
             "likely not registered by the site's form validation."
         )
 
-    await locator.click(timeout=10000)
+        await locator.click(timeout=10000)
     await page.wait_for_timeout(settings.WFH_WAIT_MS)
 
+    from services.email_service import send_wfh_notification
+    send_wfh_notification(state["start_date"], state["end_date"], state["reason"])
     return {
         "current_step": "wfh_submitted",
         "status": "completed",

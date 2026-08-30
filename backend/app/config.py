@@ -73,20 +73,22 @@ class Settings(BaseSettings):
     ATTENDANCE_SITE_ORIGIN: str = ""
 
 
-    # =====================================================
-    # POST LOGIN
-    # =====================================================
-    #
-    # After Sign In, the target website may show a button
-    # that must be clicked before the OTP screen appears.
-    #
-    # Change this selector according to your target site.
-    #
-    # =====================================================
-
     POST_LOGIN_BUTTON_SELECTOR: str = (
         'text="Continue"'
     )
+        # =====================================================
+    # EMAIL NOTIFICATIONS (Gmail SMTP)
+    # =====================================================
+
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
+    SMTP_TO_EMAIL: str = ""
+    SMTP_USE_TLS: bool = True
+    SMTP_EMPLOYEE_NAME: str = ""
+    SMTP_EMPLOYEE_PHONE: str = ""
 
 
     # =====================================================
