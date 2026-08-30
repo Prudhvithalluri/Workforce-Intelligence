@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Bell,
@@ -113,12 +113,23 @@ function PinInput({ value, onChange, label = "Enter 4-Digit PIN", onEnter }) {
     </div>
   );
 }
-function OtpModal({ onSubmit, busy, error, progressStep, progressMessage }) {
+function OtpModal({ onSubmit, onCancel, busy, error, progressStep, progressMessage }) {
   const [otp, setOtp] = useState("");
 
   return (
     <div className="modal-backdrop">
       <div className="modal-card otp-card">
+        {onCancel && (
+          <button
+            className="modal-close"
+            onClick={onCancel}
+            disabled={busy}
+            title="Cancel and start over"
+          >
+            <X size={20} />
+          </button>
+        )}
+
         <div className="modal-icon">
           <ShieldCheck size={28} />
         </div>
@@ -173,6 +184,12 @@ function OtpModal({ onSubmit, busy, error, progressStep, progressMessage }) {
               finish the request.
             </p>
           </>
+        )}
+
+        {!busy && onCancel && (
+          <button className="link-button" onClick={onCancel}>
+            Didn't get an OTP? Cancel and start over
+          </button>
         )}
       </div>
     </div>
@@ -238,7 +255,20 @@ function WfhModal({ sessionId, onClose, onSuccess }) {
     "Location will be captured on submit"
   );
 
+  // A synchronous guard against double-submission. `disabled={busy}` on the
+  // button only takes effect after React re-renders, which happens
+  // asynchronously -- two rapid clicks (double-click, or an accidental
+  // double-tap on mobile) can both fire submit() before that re-render
+  // happens, sending two concurrent WFH requests for the same session.
+  // The backend serializes them, but the second response can still end up
+  // overwriting the first one's OTP challenge in the Dashboard, leaving
+  // neither modal in a consistent, visible state. A ref updates instantly,
+  // with no render delay, so this closes the gap completely.
+  const submittingRef = useRef(false);
+
   const submit = async () => {
+    if (submittingRef.current) return;
+
     setError("");
 
     if (!startDate || !endDate || !reason.trim()) {
@@ -251,6 +281,7 @@ function WfhModal({ sessionId, onClose, onSuccess }) {
       return;
     }
 
+    submittingRef.current = true;
     setBusy(true);
 
     try {
@@ -298,6 +329,7 @@ function WfhModal({ sessionId, onClose, onSuccess }) {
       setError(e.message);
       setLocationStatus("Location not captured");
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   };
@@ -568,6 +600,19 @@ function LoginPage({ onAuthenticated }) {
     return (
       <OtpModal
         onSubmit={verifyOtp}
+        onCancel={async () => {
+          if (sessionId) {
+            try {
+              await api.cancelSession(sessionId);
+            } catch (e) {
+              // Best-effort: still reset the local UI even if the backend
+              // call fails (e.g. session already gone).
+            }
+          }
+          setChallengeId(null);
+          setError("");
+          setStep("username");
+        }}
         busy={busy}
         error={error}
       />
@@ -695,6 +740,11 @@ function LoginPage({ onAuthenticated }) {
 function Dashboard({ sessionId, username, onLogout }) {
   const [wfhOpen, setWfhOpen] = useState(false);
   const [busyAction, setBusyAction] = useState("");
+  // Same synchronous double-click guard as WfhModal's submittingRef --
+  // `disabled={Boolean(busyAction)}` only takes effect after a re-render,
+  // so a rapid double-click/double-tap could otherwise fire two concurrent
+  // Punch In/Out requests before React disables the button.
+  const actionInFlightRef = useRef(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [automationStatus, setAutomationStatus] = useState(null);
@@ -704,6 +754,16 @@ function Dashboard({ sessionId, username, onLogout }) {
   const [otpAction, setOtpAction] = useState("");
   const [otpBusy, setOtpBusy] = useState(false);
   const [otpError, setOtpError] = useState("");
+
+  // The background poller (below) reads this to avoid redundantly
+  // re-triggering the OTP modal for a challenge that's already open/being
+  // verified. Using a ref instead of the state directly keeps poll()'s
+  // closure fresh without needing to restart the polling interval every
+  // time otpChallengeId changes.
+  const otpChallengeIdRef = useRef(null);
+  useEffect(() => {
+    otpChallengeIdRef.current = otpChallengeId;
+  }, [otpChallengeId]);
 
   const processAutomationResult = (result, actionName, { otpJustVerified = false } = {}) => {
     const status =
@@ -770,7 +830,13 @@ function Dashboard({ sessionId, username, onLogout }) {
     processAutomationResult(result, actionName, options);
   };
 
+  // Same synchronous double-click guard pattern as above -- the "Verify
+  // OTP" button's disabled state also only takes effect after a re-render.
+  const otpSubmitInFlightRef = useRef(false);
+
   const verifyAutomationOtp = async (otp) => {
+    if (otpSubmitInFlightRef.current) return;
+
     const cleanOtp = String(otp || "").replace(/\D/g, "").slice(0, 6);
 
     if (!otpChallengeId) {
@@ -783,6 +849,7 @@ function Dashboard({ sessionId, username, onLogout }) {
       return;
     }
 
+    otpSubmitInFlightRef.current = true;
     setOtpBusy(true);
     setOtpError("");
 
@@ -830,11 +897,15 @@ function Dashboard({ sessionId, username, onLogout }) {
 
       setOtpError(e.message);
     } finally {
+      otpSubmitInFlightRef.current = false;
       setOtpBusy(false);
     }
   };
 
   const action = async (name) => {
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
+
     setMessage("");
     setError("");
     setAutomationStatus("running");
@@ -871,6 +942,7 @@ function Dashboard({ sessionId, username, onLogout }) {
       setError(e.message);
       setAutomationMessage(e.message);
     } finally {
+      actionInFlightRef.current = false;
       setBusyAction("");
     }
   };
@@ -902,11 +974,24 @@ function Dashboard({ sessionId, username, onLogout }) {
           result?.otp_challenge_id ||
           result?.details?.challenge_id;
 
+        // Only treat this as a NEW OTP request if there isn't already one
+        // open for the same challenge. Without this guard, this background
+        // poller (which runs concurrently with the OTP modal's own
+        // /verify-otp call, via otpBusy) can see a stale "waiting" snapshot
+        // still sitting in session.workflow from just before OTP was
+        // submitted, and redundantly reset the already-open OTP modal's
+        // state (action, error, status/step text) while the real
+        // verification is still in flight -- which is exactly the kind of
+        // "two popups fighting" glitch that shows up as the modal
+        // flickering/closing.
+        const isGenuinelyNewChallenge =
+          statusChallengeId && statusChallengeId !== otpChallengeIdRef.current;
+
         if (
           (result?.status === "waiting" ||
             result?.status === "otp_required" ||
             result?.status === "waiting_for_user") &&
-          statusChallengeId
+          isGenuinelyNewChallenge
         ) {
           console.info("[AttendEase] OTP requested by backend; opening OTP popup");
           setOtpChallengeId(statusChallengeId);
@@ -1110,6 +1195,20 @@ function Dashboard({ sessionId, username, onLogout }) {
       {otpChallengeId && (
         <OtpModal
           onSubmit={verifyAutomationOtp}
+          onCancel={async () => {
+            try {
+              await api.cancelSession(sessionId);
+            } catch (e) {
+              // Best-effort: still reset the local UI even if the backend
+              // call fails (e.g. the browser session was already gone).
+            }
+            setOtpChallengeId(null);
+            setOtpAction("");
+            setOtpError("");
+            setAutomationStatus("failed");
+            setAutomationStep("");
+            setAutomationMessage("Cancelled. You can start the action again.");
+          }}
           busy={otpBusy}
           error={otpError}
           progressStep={automationStep}

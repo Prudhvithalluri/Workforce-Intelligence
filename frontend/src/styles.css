@@ -56,6 +56,8 @@ button { cursor: pointer; }
 .small-logo { width:46px; height:46px; border-radius:14px; display:grid; place-items:center; background:#12bd8c; color:#061017; }
 .muted { color:#8c9ab2; font-size:13px; }
 .avatar { width:44px; height:44px; border-radius:50%; background:#222a3b; display:grid; place-items:center; color:#94a3bd; }
+.logout-button { border:0; background:transparent; color:#94a3bd; padding:8px; border-radius:10px; display:grid; place-items:center; transition:background .15s ease, color .15s ease; }
+.logout-button:hover { background:#1a2030; color:#f8fafc; }
 .dashboard-main { width:min(1160px,calc(100% - 80px)); margin:48px auto; }
 .profile-card { display:flex; align-items:center; gap:22px; background:#131b30; border:1px solid #263149; border-radius:32px; padding:30px; }
 .avatar-large { width:94px; height:94px; border-radius:50%; background:#9bc7df; color:#24334a; display:grid; place-items:center; }
@@ -93,6 +95,8 @@ button { cursor: pointer; }
 .otp-card { max-width:470px; }
 .otp-card .primary-button { width:100%; margin-top:18px; }
 .otp-input { margin-top:8px; margin-bottom:14px; background:white; color:#222; letter-spacing:6px; text-align:center; font-size:24px; }
+.link-button { display:block; width:100%; margin-top:14px; border:0; background:transparent; color:#8aa2c8; font-weight:700; font-size:13px; text-align:center; text-decoration:underline; }
+.link-button:hover { color:#c7d2fe; }
 .tabs { display:flex; gap:8px; margin:18px 0 22px; padding:5px; border-radius:14px; background:#121a2d; }
 .tabs button { flex:1; border:0; border-radius:10px; padding:11px; color:#8794ad; background:transparent; font-weight:800; }
 .tabs button.active { color:#eafff8; background:#19372f; }
@@ -114,19 +118,84 @@ button { cursor: pointer; }
 .action-card.purple .wave-a { background:rgba(192,132,252,.72); }
 @keyframes attendEaseWave { 0% { transform:translate3d(-8%,8%,0) rotate(0deg); } 50% { transform:translate3d(8%,-5%,0) rotate(180deg); } 100% { transform:translate3d(-8%,8%,0) rotate(360deg); } }
 
-@media (max-width:760px) {
-  .auth-shell { padding:30px 20px; }
-  .topbar { padding:0 18px; }
-  .dashboard-main { width:calc(100% - 32px); margin:26px auto; }
-  .profile-card { padding:20px; }
-  .action-grid { grid-template-columns:1fr; }
-  .wfh-form { grid-template-columns:1fr; }
-  .reason-select, .reason-area { width:100%; grid-column:auto; }
-  .pin-input { max-width:100%; font-size:24px; letter-spacing:8px; }
+/* ============================================================
+   RESPONSIVE LAYOUT
+   Desktop-first base styles above. Three real breakpoints below:
+   tablet (<=1024px), mobile (<=640px), small phones (<=380px).
+   ============================================================ */
+
+/* ---------- Tablet (iPad portrait/landscape, ~768-1024px) ---------- */
+@media (max-width: 1024px) {
+  .auth-shell { width: 100%; padding: 36px 32px; }
+  .topbar { padding: 0 32px; }
+  .dashboard-main { width: calc(100% - 48px); margin: 32px auto; }
+  .action-grid { grid-template-columns: repeat(2, 1fr); gap: 18px; }
+  .action-card { min-height: 210px; padding: 24px; }
+  .modal-card { width: min(560px, 100%); padding: 26px; }
+  .brand-block h1 { font-size: 36px; }
 }
-@media (max-width:720px) {
-  .auth-shell { padding:32px 20px; }
-  .topbar { padding:0 20px; }
-  .dashboard-main { padding:28px 20px; }
-  .action-grid { grid-template-columns:1fr; }
+
+/* ---------- Mobile (phones, ~<=640px) ---------- */
+@media (max-width: 640px) {
+  body { min-width: 0; }
+
+  .auth-shell { padding: 24px 18px; }
+  .brand-block { margin: 4px auto 32px; }
+  .brand-block h1 { font-size: 28px; letter-spacing: -1px; }
+  .brand-block p { font-size: 16px; }
+  .logo-mark { width: 76px; height: 76px; margin-bottom: 18px; }
+
+  .pin-screen h1 { font-size: 26px; }
+  .pin-screen > p { font-size: 15px; }
+  .pin-input { max-width: 100%; font-size: 22px; letter-spacing: 8px; padding: 14px; }
+
+  .topbar { height: 60px; padding: 0 16px; }
+  .small-brand { font-size: 16px; }
+  .small-logo { width: 38px; height: 38px; border-radius: 11px; }
+  .avatar { width: 36px; height: 36px; }
+  .top-right span.muted { display: none; } /* "English" label hidden to save space, avatar/logout remain */
+
+  .dashboard-main { width: calc(100% - 24px); margin: 20px auto; }
+
+  .profile-card { flex-direction: column; align-items: flex-start; text-align: left; gap: 14px; padding: 20px; border-radius: 22px; }
+  .avatar-large { width: 72px; height: 72px; }
+  .profile-card h2 { font-size: 22px; }
+  .profile-card p { font-size: 15px; }
+  .active-pill { margin-left: 0; }
+
+  .section-title { font-size: 15px; margin: 28px 0 16px; }
+
+  .action-grid { grid-template-columns: 1fr; gap: 16px; }
+  .action-card { min-height: 150px; padding: 22px; border-radius: 22px; }
+  .card-copy { left: 22px; bottom: 22px; }
+  .card-copy strong { font-size: 20px; }
+  .card-copy span { font-size: 14px; }
+  .icon-circle { width: 46px; height: 46px; }
+
+  .modal-backdrop { padding: 12px; align-items: flex-end; }
+  .modal-card { width: 100%; max-height: 88vh; padding: 20px; border-radius: 22px 22px 0 0; }
+  .modal-card h2 { font-size: 22px; }
+  .modal-card > p { font-size: 14px; margin-bottom: 18px; }
+  .modal-actions { flex-direction: column-reverse; }
+  .modal-actions button { width: 100%; }
+
+  .otp-card { max-width: 100%; }
+  .otp-input { font-size: 20px; letter-spacing: 4px; padding: 14px; }
+
+  .wfh-form { gap: 4px; }
+  .wfh-form .text-input, .wfh-form .fake-select { padding: 11px; }
+
+  .location-status { font-size: 13px; padding: 10px 12px; }
+}
+
+/* ---------- Small phones (iPhone SE and similar, ~<=380px) ---------- */
+@media (max-width: 380px) {
+  .auth-shell { padding: 18px 14px; }
+  .brand-block h1 { font-size: 24px; }
+  .pin-input { font-size: 18px; letter-spacing: 5px; }
+  .topbar { padding: 0 12px; }
+  .dashboard-main { width: calc(100% - 16px); }
+  .profile-card { padding: 16px; }
+  .action-card { padding: 18px; min-height: 130px; }
+  .modal-card { padding: 16px; }
 }
