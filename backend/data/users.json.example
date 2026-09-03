@@ -1,9 +1,0 @@
-{
-  "users": [
-    {
-      "username": "your-username",
-      "target_password": "your-target-password",
-      "app_pin": "1234"
-    }
-  ]
-}

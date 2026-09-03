@@ -11,7 +11,6 @@ from browser.helpers import (
     LOGIN_SELECTORS,
     NAV_SELECTORS,
     WFH_SELECTORS,
-    capture_screenshot,
     page_snapshot,
     visible,
 )
@@ -55,7 +54,22 @@ def _workflow(state, **values):
     session.workflow.update(values)
     logger.info("workflow_updated step=%s status=%s", values.get("current_step", state.get("current_step")), values.get("status", state.get("status")))
 
+def _schedule_browser_close(session_id: str, delay_seconds: int = 10) -> None:
+    async def _closer():
+        await asyncio.sleep(delay_seconds)
+        try:
+            await session_manager.close(session_id)
+            logger.info(
+                "browser_auto_closed_after_delay session=%s delay_seconds=%s",
+                session_id[:8],
+                delay_seconds,
+            )
+        except Exception:
+            logger.exception(
+                "browser_auto_close_failed session=%s", session_id[:8]
+            )
 
+    asyncio.create_task(_closer())
 async def _nav_visible(page, text: str, timeout: int = 5000) -> bool:
     """Check the existing target-site navigation selector without inventing selectors."""
     try:
@@ -370,6 +384,31 @@ async def click_post_login_button(state):
 # OTP
 # ---------------------------------------------------------
 
+# Exact text the target site shows (inside a web-component's shadow DOM)
+# when the entered OTP is rejected. Playwright's get_by_text locator
+# automatically pierces open shadow roots, so this finds the message
+# without needing to know which element/shadow host renders it.
+INVALID_OTP_TEXT = (
+    "The code you entered is not valid. Please check your entry and try again."
+)
+
+
+async def _invalid_otp_alert_visible(page, timeout_ms=4000):
+    """
+    Returns True if the target site's "invalid OTP" alert is visible,
+    False otherwise. This is the deterministic signal for whether the
+    OTP was accepted -- it is checked directly rather than inferred from
+    a URL/redirect, since some target-site flows can delay the redirect
+    or briefly show an intermediate URL even on a valid OTP.
+    """
+    alert_element = page.get_by_text(INVALID_OTP_TEXT)
+    try:
+        await alert_element.wait_for(state="visible", timeout=timeout_ms)
+        return True
+    except PlaywrightTimeoutError:
+        return False
+
+
 async def request_otp(state):
     session = _session(state)
     page = session.page
@@ -489,18 +528,55 @@ async def submit_otp(state):
     logger.info("OTP: target-site Submit clicked")
 
     # ------------------------------------------------------------
-    # IMPORTANT: do not sleep a fixed amount of time and check the
-    # URL exactly once. Enterprise SSO / attendance sites often do
-    # several redirects after Submit, and the final hop to
-    # /dashboard can land after POST_LOGIN_WAIT_MS has already
-    # elapsed. Checking only once at a fixed delay caused a valid
-    # OTP to be reported as "not accepted" simply because the
-    # dashboard redirect hadn't finished yet.
+    # DETERMINISTIC OTP RESULT CHECK
     #
-    # Instead, actively poll the page URL until it reaches
-    # /dashboard or the action timeout is hit.
+    # The target site's own "invalid OTP" alert is the source of truth:
+    #
+    #   alert_element = page.get_by_text(
+    #       "The code you entered is not valid. Please check your entry "
+    #       "and try again."
+    #   )
+    #
+    # get_by_text() automatically pierces any open shadow root, so this
+    # finds the alert even when the target site renders it inside a
+    # web-component. If the alert becomes visible after clicking Submit,
+    # the OTP was rejected and the user must re-enter it. If it never
+    # appears, the OTP was accepted and the flow continues.
+    #
+    # A previous version of this check relied only on the URL reaching
+    # /dashboard, which was unreliable: some enterprise SSO / attendance
+    # sites redirect slowly or through an intermediate URL even for a
+    # VALID OTP, which could report a good OTP as rejected. Checking the
+    # alert directly avoids that false negative. The dashboard-URL poll
+    # is kept afterwards purely as a secondary confirmation/log signal,
+    # not as the pass/fail gate.
     # ------------------------------------------------------------
 
+    otp_invalid = await _invalid_otp_alert_visible(page)
+
+    if otp_invalid:
+        current_url = page.url
+        session.otp_target_site_url = current_url
+        logger.warning(
+            "OTP: invalid-OTP alert is visible on target site; requesting OTP again"
+        )
+        return {
+            "otp_required": True,
+            "otp_verified": False,
+            "otp_invalid": True,
+            "otp_challenge_id": session.otp_challenge_id,
+            "otp_target_site_url": baseline_url,
+            "post_otp_target_site_url": current_url,
+            "otp_attempt": session.otp_attempt,
+            "current_step": "otp_waiting",
+            "action_result": "otp_not_accepted_reenter_otp",
+        }
+
+    logger.info(
+        "OTP: invalid-OTP alert is not visible; OTP accepted, continuing flow"
+    )
+
+    # Secondary confirmation / logging only -- does not gate success.
     dashboard_pattern = re.compile(
         r"/dashboard(?:[/?#].*)?$",
         re.IGNORECASE,
@@ -524,30 +600,6 @@ async def submit_otp(state):
         dashboard_url,
     )
 
-    # OTP success is deliberately deterministic: the target site must reach
-    # /dashboard. A URL change to some other page is NOT treated as success.
-    # The frontend URL is never involved in this check.
-
-    if not dashboard_url:
-        session.otp_target_site_url = current_url
-        logger.warning(
-            "OTP: target-site URL did not reach /dashboard; requesting OTP again"
-        )
-        return {
-            "otp_required": True,
-            "otp_verified": False,
-            "otp_invalid": True,
-            "otp_challenge_id": session.otp_challenge_id,
-            "otp_target_site_url": baseline_url,
-            "post_otp_target_site_url": current_url,
-            "otp_attempt": session.otp_attempt,
-            "current_step": "otp_waiting",
-            "action_result": "otp_not_accepted_reenter_otp",
-        }
-
-    logger.info(
-        "OTP: target-site reached /dashboard; OTP accepted"
-    )
     session.otp_target_site_url = baseline_url
 
     # Give the dashboard a brief moment to finish rendering (nav links etc.)
@@ -599,11 +651,8 @@ async def click_time_attendance(state):
     # Defense against duplicate tabs.
     #
     # If a previous attempt already opened a Time & Attendance tab (e.g. a
-    # retry after a transient/verification error), reuse or close it instead
-    # of clicking again and letting the target site open yet another tab.
-    # Each click on this nav link opens a NEW popup on this site, so retrying
-    # the click without cleaning up the old tab is what caused 3-4 tabs to
-    # pile up with different URLs.
+    # retry after a transient/verification error), close it before
+    # retrying, so we never accumulate stale popups.
     # --------------------------------------------------------
     existing = session.attendance_page
     if existing is not None and existing is not page and not existing.is_closed():
@@ -621,68 +670,80 @@ async def click_time_attendance(state):
     )
     await locator.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
 
-    # Time & Attendance may open a popup/new tab or navigate the current page.
-    attendance_page = None
+    popup_page = None
     try:
         async with page.expect_popup(timeout=5000) as popup_info:
             await locator.click(timeout=10000)
-        attendance_page = await popup_info.value
+        popup_page = await popup_info.value
     except PlaywrightTimeoutError:
-        # The click already happened. No popup means the site navigated the
-        # existing page (or opened the content without a popup). Do not click twice.
+        # No popup: the site navigated the existing page directly. The
+        # click already happened -- do not click again.
+        popup_page = None
+
+    if popup_page is not None:
+        try:
+            await popup_page.wait_for_load_state(
+                "domcontentloaded", timeout=settings.ACTION_TIMEOUT_MS
+            )
+        except Exception:
+            pass
+
+        # Poll the popup's URL until it stops changing (settles) -- this
+        # site redirects through more than one URL before landing on its
+        # real destination (seen in production:
+        # .../V7/ess/dashboard -> .../infoservices.securtime.adp.com/ng/dashboard).
+        settle_check_ms = 400
+        stable_reads_required = 2
+        elapsed_ms = 0
+        stable_reads = 0
+        last_url = popup_page.url
+
+        while (
+            stable_reads < stable_reads_required
+            and elapsed_ms < settings.ACTION_TIMEOUT_MS
+        ):
+            await popup_page.wait_for_timeout(settle_check_ms)
+            elapsed_ms += settle_check_ms
+            current_url = popup_page.url
+            if current_url == last_url:
+                stable_reads += 1
+            else:
+                logger.info(
+                    "Time & Attendance: popup URL changed mid-redirect %s -> %s",
+                    last_url,
+                    current_url,
+                )
+                stable_reads = 0
+                last_url = current_url
+
+        final_url = last_url
+
+        logger.info(
+            "Time & Attendance: popup settled on URL=%s (waited %sms); "
+            "closing popup and navigating the original page instead "
+            "so only one video is recorded for this session",
+            final_url,
+            elapsed_ms,
+        )
+
+        try:
+            await popup_page.close()
+        except Exception:
+            logger.exception("Time & Attendance: failed to close popup after capturing its URL")
+
+        await page.goto(
+            final_url,
+            wait_until="domcontentloaded",
+            timeout=settings.ACTION_TIMEOUT_MS,
+        )
+
+        attendance_page = page
+
+    else:
+        # No popup occurred -- the click navigated the existing page.
         attendance_page = page
 
     session.attendance_page = attendance_page
-
-    try:
-        await attendance_page.wait_for_load_state(
-            "domcontentloaded", timeout=settings.ACTION_TIMEOUT_MS
-        )
-    except Exception:
-        pass
-
-    # --------------------------------------------------------
-    # Catch the FINAL url, not an intermediate redirect hop.
-    #
-    # This target site's Time & Attendance tab redirects through more than
-    # one URL before landing on its real destination (seen in production:
-    # .../V7/ess/dashboard -> .../infoservices.securtime.adp.com/ng/dashboard).
-    # "domcontentloaded" only guarantees the FIRST hop finished, so capturing
-    # attendance_page.url right after it can grab a transitional URL.
-    #
-    # Poll the URL until it stops changing (settles) or the action timeout
-    # is hit, so downstream steps (Punch In / Punch Out / Absence
-    # Management) see the real, final page.
-    # --------------------------------------------------------
-    settle_check_ms = 400
-    stable_reads_required = 2
-    elapsed_ms = 0
-    stable_reads = 0
-    last_url = attendance_page.url
-
-    while (
-        stable_reads < stable_reads_required
-        and elapsed_ms < settings.ACTION_TIMEOUT_MS
-    ):
-        await attendance_page.wait_for_timeout(settle_check_ms)
-        elapsed_ms += settle_check_ms
-        current_url = attendance_page.url
-        if current_url == last_url:
-            stable_reads += 1
-        else:
-            logger.info(
-                "Time & Attendance: URL changed mid-redirect %s -> %s",
-                last_url,
-                current_url,
-            )
-            stable_reads = 0
-            last_url = current_url
-
-    logger.info(
-        "Time & Attendance: settled on URL=%s (waited %sms)",
-        last_url,
-        elapsed_ms,
-    )
 
     # Give the final page a moment to finish rendering its own content
     # (nav links, Punch In / absence management buttons, etc.).
@@ -694,7 +755,6 @@ async def click_time_attendance(state):
         "page_url": attendance_page.url,
         "page_title": await attendance_page.title(),
     }
-
 
 # ---------------------------------------------------------
 # Location
@@ -787,7 +847,7 @@ async def confirm_punch_in(state):
     await locator.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
     await locator.click(timeout=10000)
     await page.wait_for_timeout(settings.PUNCH_CONFIRM_WAIT_MS)
-
+    _schedule_browser_close(state["session_id"])
     return {
         "current_step": "punch_in_completed",
         "status": "completed",
@@ -826,7 +886,7 @@ async def click_punch_out(state):
     await locator.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
     await locator.click(timeout=10000)
     await page.wait_for_timeout(settings.PUNCH_CONFIRM_WAIT_MS)
-
+    _schedule_browser_close(state["session_id"])
     return {
         "current_step": "punch_out_clicked",
         "action_result": "punch_out_clicked_confirmation_expected",
@@ -1123,12 +1183,6 @@ async def enter_wfh_reason(state):
     locator = page.get_by_role("textbox", name="Enter Reason").first
     await locator.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
     await locator.fill(state["reason"])
-
-    # Tab alone doesn't reliably move focus fully out of this custom
-    # shadow-DOM textbox, so the site's own validation (which enables the
-    # Submit button) never fires. Force a real blur on the actual focused
-    # element, then also click elsewhere on the page as a fallback, to make
-    # sure focus genuinely leaves the description field.
     try:
         await locator.evaluate("el => el.blur()")
     except Exception:
@@ -1150,8 +1204,6 @@ async def enter_wfh_reason(state):
 
 async def submit_wfh(state):
     page = _page(state)
-    await capture_screenshot(page, state.get("session_id"), "wfh_before_submit")
-
     locator = page.locator(WFH_SELECTORS["submit"]).first
     await locator.wait_for(state="visible", timeout=settings.ACTION_TIMEOUT_MS)
     enabled = False
@@ -1169,16 +1221,15 @@ async def submit_wfh(state):
         waited_ms += 300
 
     if not enabled:
-        await capture_screenshot(page, state.get("session_id"), "wfh_submit_still_disabled")
         raise RuntimeError(
             "WFH Submit button stayed disabled -- one of the fields "
             "(start date, end date, reason, or dropdown selection) was "
             "likely not registered by the site's form validation."
         )
 
-        await locator.click(timeout=10000)
+    await locator.click(timeout=10000)
     await page.wait_for_timeout(settings.WFH_WAIT_MS)
-
+    _schedule_browser_close(state["session_id"])
     from services.email_service import send_wfh_notification
     send_wfh_notification(state["start_date"], state["end_date"], state["reason"])
     return {

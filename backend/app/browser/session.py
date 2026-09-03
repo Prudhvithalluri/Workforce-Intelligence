@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -46,34 +48,25 @@ class BrowserSession:
     attendance_page: Page | None = None
     location: dict | None = None
 
+    # Path of the saved screen recording for this session, populated once
+    # the context is closed and Playwright finishes writing the video
+    # file(s). If the main page and the Time & Attendance popup each
+    # produced their own video (Playwright records one video per Page),
+    # this is the MERGED single file when ffmpeg was available, or the
+    # first of the individual parts otherwise -- see video_parts.
+    video_path: str | None = None
+
+    # If merging wasn't possible (ffmpeg not installed), this holds every
+    # individual video file that was recorded for this session, in
+    # chronological order, so nothing is silently lost.
+    video_parts: list[str] | None = None
+
     # OTP state for the target site's human-in-the-loop verification.
     otp_challenge_id: str | None = None
     otp_target_site_url: str | None = None
     otp_attempt: int = 0
 
-    # ========================================================
-    # TARGET-SITE AUTHENTICATION
-    # ========================================================
-    #
-    # True only after the target site's OTP has been verified
-    # (i.e. submit_otp confirmed the /dashboard URL) for the
-    # CURRENT browser page/context.
-    #
-    # This lets subsequent Punch In / Punch Out / WFH operations
-    # skip the entire open_site -> username -> password -> OTP
-    # sequence and resume directly from "authenticated", so the
-    # user is only asked for OTP ONCE per browser session.
-    #
-    # It is reset to False whenever the underlying Playwright
-    # page is (re)created, since a new page means the target
-    # site is no longer logged in.
-    # ========================================================
-
     target_authenticated: bool = False
-
-    # ========================================================
-    # WORKFLOW
-    # ========================================================
 
     workflow: dict = field(
         default_factory=lambda: {
@@ -247,6 +240,98 @@ class BrowserSession:
             "The browser has not been started."
         )
 
+
+# ============================================================
+# VIDEO MERGING
+# ============================================================
+
+async def _merge_video_parts(paths: list[str], session_id: str) -> str | None:
+    """
+    Playwright records one video per Page, not per BrowserContext. When
+    the target site opens Time & Attendance in a popup, that popup is a
+    new Page, so it gets its own separate video file -- splitting the
+    recording right at that click.
+
+    This stitches those separate files back into a single continuous
+    video using ffmpeg's concat demuxer (stream copy, no re-encoding,
+    since all parts share the same resolution/codec).
+
+    Returns the merged file path, or None if ffmpeg isn't available or
+    the merge failed for any reason -- callers should fall back to
+    keeping the individual parts rather than losing them.
+    """
+
+    if len(paths) < 2:
+        return paths[0] if paths else None
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+
+    if not ffmpeg_bin:
+        logger.warning(
+            "ffmpeg_not_found_skipping_video_merge session=%s parts=%s",
+            session_id[:8],
+            len(paths),
+        )
+        return None
+
+    output_dir = Path(paths[0]).parent
+    output_path = output_dir / f"{session_id}_full.webm"
+    list_file = output_dir / f"{session_id}_concat_list.txt"
+
+    try:
+        with open(list_file, "w", encoding="utf-8") as f:
+            for part_path in paths:
+                # ffmpeg's concat demuxer resolves relative paths in this
+                # list file relative to the list file's OWN directory, not
+                # the process's working directory -- always write absolute
+                # paths here to avoid any risk of doubled-up paths.
+                absolute_path = str(Path(part_path).resolve())
+                escaped = absolute_path.replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
+
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_bin,
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_file),
+            "-c", "copy",
+            str(output_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        _, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            logger.error(
+                "ffmpeg_video_merge_failed session=%s returncode=%s stderr=%s",
+                session_id[:8],
+                process.returncode,
+                stderr.decode(errors="ignore")[-2000:],
+            )
+            return None
+
+        logger.info(
+            "ffmpeg_video_merge_succeeded session=%s parts=%s output=%s",
+            session_id[:8],
+            len(paths),
+            output_path,
+        )
+
+        return str(output_path)
+
+    except Exception:
+        logger.exception("ffmpeg_video_merge_error session=%s", session_id[:8])
+        return None
+
+    finally:
+        try:
+            list_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 # ============================================================
 # SESSION MANAGER
 # ============================================================
@@ -261,21 +346,6 @@ class BrowserSessionManager:
         ] = {}
 
         self._lock = asyncio.Lock()
-
-    # ========================================================
-    # CREATE APPLICATION SESSION
-    # ========================================================
-    #
-    # IMPORTANT:
-    #
-    # THIS DOES NOT START PLAYWRIGHT.
-    #
-    # Login with the application PIN only creates this
-    # lightweight session.
-    #
-    # Browser starts later when Punch In / Punch Out / WFH
-    # calls start_browser().
-    # ========================================================
 
     async def create(self) -> BrowserSession:
 
@@ -342,14 +412,36 @@ class BrowserSessionManager:
                 headless=settings.PLAYWRIGHT_HEADLESS
             )
 
+            # Recording starts the moment this context is created. Video
+            # size deliberately matches the viewport (VIDEO_WIDTH/HEIGHT):
+            # in headed mode, Chromium can only actually render up to
+            # whatever fits the real screen, so a video size larger than
+            # the real screen pads the unrendered remainder with a solid
+            # gray/black bar. VIDEO_WIDTH/HEIGHT default to 1280x720,
+            # which fits virtually any real monitor.
+            video_dir = settings.video_dir_path
+            video_dir.mkdir(parents=True, exist_ok=True)
+
+            viewport_size = {
+                "width": settings.VIDEO_WIDTH,
+                "height": settings.VIDEO_HEIGHT,
+            }
+
             context = await browser.new_context(
-                viewport={
-                    "width": 1920,
-                    "height": 1080,
-                }
+                viewport=viewport_size,
+                record_video_dir=str(video_dir),
+                record_video_size=viewport_size,
             )
 
             page = await context.new_page()
+
+            logger.info(
+                "screen_recording_started session=%s video_dir=%s size=%sx%s",
+                session_id[:8],
+                video_dir,
+                settings.VIDEO_WIDTH,
+                settings.VIDEO_HEIGHT,
+            )
 
         except Exception:
             logger.exception("browser_start_failed session=%s", session_id[:8])
@@ -426,13 +518,85 @@ class BrowserSessionManager:
             # ------------------------------------------------
             # Close context
             # ------------------------------------------------
+            #
+            # A video file is only finalized once its owning Page is
+            # closed (which happens when the context closes), so grab
+            # the Video handles BEFORE closing, then read .path() AFTER.
+            #
+            # Playwright records one video PER PAGE, not per context.
+            # The Time & Attendance popup is a separate Page, so if it
+            # was opened, it produced its own separate video file --
+            # both are collected here and merged into one continuous
+            # recording below.
+            # ------------------------------------------------
 
             if session.context is not None:
+
+                main_video = getattr(session.page, "video", None)
+
+                attendance_video = None
+                if (
+                    session.attendance_page is not None
+                    and session.attendance_page is not session.page
+                ):
+                    attendance_video = getattr(session.attendance_page, "video", None)
 
                 try:
                     await session.context.close()
                 except Exception:
                     pass
+
+                video_paths: list[str] = []
+
+                if main_video is not None:
+                    try:
+                        video_paths.append(await main_video.path())
+                    except Exception:
+                        logger.exception(
+                            "screen_recording_save_failed session=%s page=main",
+                            session_id[:8],
+                        )
+
+                if attendance_video is not None:
+                    try:
+                        video_paths.append(await attendance_video.path())
+                    except Exception:
+                        logger.exception(
+                            "screen_recording_save_failed session=%s page=attendance",
+                            session_id[:8],
+                        )
+
+                if len(video_paths) == 1:
+                    session.video_path = video_paths[0]
+                    session.video_parts = video_paths
+                    logger.info(
+                        "screen_recording_saved session=%s path=%s",
+                        session_id[:8],
+                        session.video_path,
+                    )
+
+                elif len(video_paths) > 1:
+                    merged_path = await _merge_video_parts(video_paths, session_id)
+
+                    if merged_path:
+                        session.video_path = merged_path
+                        session.video_parts = video_paths
+                        logger.info(
+                            "screen_recording_saved_merged session=%s path=%s parts=%s",
+                            session_id[:8],
+                            merged_path,
+                            video_paths,
+                        )
+                    else:
+                        # ffmpeg unavailable or merge failed -- keep both
+                        # individual files rather than losing footage.
+                        session.video_path = video_paths[0]
+                        session.video_parts = video_paths
+                        logger.warning(
+                            "screen_recording_merge_unavailable session=%s parts=%s",
+                            session_id[:8],
+                            video_paths,
+                        )
 
                 session.context = None
 

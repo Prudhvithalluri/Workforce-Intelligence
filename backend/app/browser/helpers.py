@@ -1,9 +1,3 @@
-"""Centralized target-site selectors.
-
-The LLM never creates selectors. It chooses only predefined action names.
-Change selectors in this file when the target site's UI changes.
-"""
-
 import logging
 import re
 from datetime import datetime, timezone
@@ -74,32 +68,3 @@ async def page_snapshot(page) -> dict:
         title = ""
     logger.debug("page_snapshot_finished title_present=%s", bool(title))
     return {"url": page.url, "title": title}
-
-
-async def capture_screenshot(page, session_id: str, label: str) -> str | None:
-    """
-    Save a full-page screenshot for debugging selector issues.
-
-    Used, e.g., right after the WFH form is fully filled in and right
-    before Submit is clicked, so a failed/disabled selector can be
-    diagnosed from what the page actually looked like at that moment.
-
-    Never raises: a screenshot failure should not break the workflow.
-    """
-    try:
-        directory = settings.screenshot_dir_path
-        directory.mkdir(parents=True, exist_ok=True)
-
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "screenshot"
-        safe_session = re.sub(r"[^A-Za-z0-9]+", "", (session_id or "")[:8]) or "session"
-
-        filename = f"{timestamp}_{safe_session}_{safe_label}.png"
-        path = directory / filename
-
-        await page.screenshot(path=str(path), full_page=True)
-        logger.info("debug_screenshot_saved label=%s path=%s", safe_label, path)
-        return str(path)
-    except Exception:
-        logger.exception("debug_screenshot_failed label=%s", label)
-        return None

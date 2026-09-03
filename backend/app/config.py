@@ -34,35 +34,12 @@ DEFAULT_USERS_FILE = (
 class Settings(BaseSettings):
 
     # =====================================================
-    # AWS BEDROCK
+    # AZURE OPENAI
     # =====================================================
-    #
-    # AWS credentials are loaded from backend/.env.
-    #
-    # AWS_SESSION_TOKEN is required when using temporary
-    # AWS credentials. If your credentials are permanent,
-    # it can remain empty.
-    #
-    # BEDROCK_MODEL_ID must be the model ID supported by
-    # your AWS Bedrock account and region.
-    #
-    # Example:
-    #
-    # AWS_REGION=us-east-1
-    # BEDROCK_MODEL_ID=your-model-id
-    #
-    # =====================================================
-
-    AWS_ACCESS_KEY_ID: str = ""
-
-    AWS_SECRET_ACCESS_KEY: str = ""
-
-    AWS_SESSION_TOKEN: str = ""
-
-    AWS_REGION: str = "us-east-1"
-
-    BEDROCK_MODEL_ID: str = ""
-
+    AZURE_OPENAI_API_KEY: str = ""
+    AZURE_OPENAI_ENDPOINT: str = ""
+    AZURE_OPENAI_DEPLOYMENT: str = ""
+    AZURE_OPENAI_API_VERSION: str = "2024-10-21"
 
     # =====================================================
     # TARGET WEBSITE
@@ -114,19 +91,9 @@ class Settings(BaseSettings):
     # =====================================================
 
     PLAYWRIGHT_HEADLESS: bool = False
-
-
-    # =====================================================
-    # DEBUG SCREENSHOTS
-    # =====================================================
-    #
-    # Directory where debug screenshots (e.g. the WFH form
-    # right before Submit is clicked) are saved. Relative
-    # paths are resolved against BASE_DIR.
-    # =====================================================
-
-    SCREENSHOT_DIR: str = str(BASE_DIR / "debug_screenshots")
-
+    VIDEO_DIR: str = str(BASE_DIR / "session_recordings")
+    VIDEO_WIDTH: int = 1280
+    VIDEO_HEIGHT: int = 720
 
     # =====================================================
     # AGENT RECOVERY
@@ -183,16 +150,16 @@ class Settings(BaseSettings):
 
 
     # =====================================================
-    # SCREENSHOT DIR PATH
+    # VIDEO DIR PATH
     # =====================================================
 
     @property
-    def screenshot_dir_path(self) -> Path:
+    def video_dir_path(self) -> Path:
 
-        logger.debug("resolving_screenshot_dir configured=%s", bool(self.SCREENSHOT_DIR))
+        logger.debug("resolving_video_dir configured=%s", bool(self.VIDEO_DIR))
 
         path = Path(
-            self.SCREENSHOT_DIR
+            self.VIDEO_DIR
         )
 
         if not path.is_absolute():
@@ -200,7 +167,6 @@ class Settings(BaseSettings):
             path = BASE_DIR / path
 
         return path.resolve()
-
 
 # =========================================================
 # GLOBAL SETTINGS INSTANCE

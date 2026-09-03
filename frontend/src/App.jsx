@@ -196,51 +196,90 @@ function OtpModal({ onSubmit, onCancel, busy, error, progressStep, progressMessa
   );
 }
 
-function AutomationStatus({ status, step, message, error }) {
-  if (!status && !step && !message && !error) return null;
-
+function LiveUpdates({ status, step, message, error }) {
   const completed = status === "completed" || status === "success";
   const failed = status === "failed" || status === "error";
   const waiting = status === "waiting_for_user" || status === "waiting";
   const running =
     status === "running" || status === "in_progress" || status === "recovering";
 
-  return (
-    <div className="automation-status">
-      <div className="automation-status-header">
-        <div className="automation-status-title">
-          {completed && <CheckCircle2 size={20} />}
-          {failed && <AlertCircle size={20} />}
-          {(running || waiting) && <Loader2 size={20} className="spin" />}
-          {!completed && !failed && !running && !waiting && <Clock3 size={20} />}
+  const statusClass = completed
+    ? "status-completed"
+    : failed
+    ? "status-failed"
+    : waiting
+    ? "status-waiting"
+    : running
+    ? "status-running"
+    : "";
 
-          <strong>
-            {completed
-              ? "Automation completed"
-              : failed
-              ? "Automation failed"
-              : waiting
-              ? "Waiting for OTP"
-              : "Automation in progress"}
-          </strong>
-        </div>
+  const statusLabel = completed
+    ? "Completed"
+    : failed
+    ? "Failed"
+    : waiting
+    ? "Waiting for OTP"
+    : running
+    ? "In progress"
+    : "Idle";
+
+  const nothingYet = !status && !step && !message && !error;
+
+  return (
+    <div className="live-updates-grid">
+      <div className={`update-card ${statusClass}`}>
+        <span className="update-label">Status</span>
+        <span className="update-value">
+          {completed && <CheckCircle2 size={16} />}
+          {failed && <AlertCircle size={16} />}
+          {(running || waiting) && <Loader2 size={16} className="spin" />}
+          {!completed && !failed && !running && !waiting && (
+            <Clock3 size={16} />
+          )}
+          {statusLabel}
+        </span>
       </div>
 
-      {step && (
-        <div className="automation-step">
-          <span className="automation-step-label">Current step</span>
-          <span className="automation-step-value">{step}</span>
-        </div>
-      )}
+      <div className="update-card">
+        <span className="update-label">Current step</span>
+        <span className="update-value">{step || "—"}</span>
+      </div>
 
-      {message && <div className="automation-message">{message}</div>}
+      <div className={`update-card update-card-wide ${error ? "status-failed" : ""}`}>
+        <span className="update-label">{error ? "Error" : "Message"}</span>
+        <span className="update-value">
+          {error && <AlertCircle size={16} />}
+          {error || message || (nothingYet ? "No activity yet." : "—")}
+        </span>
+      </div>
+    </div>
+  );
+}
 
-      {error && (
-        <div className="automation-error">
-          <AlertCircle size={16} />
-          {error}
+function StepsLog({ steps }) {
+  const endRef = useRef(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "nearest" });
+  }, [steps.length]);
+
+  if (!steps.length) {
+    return (
+      <div className="steps-log steps-log-empty">
+        No steps yet. They'll appear here as an action runs.
+      </div>
+    );
+  }
+
+  return (
+    <div className="steps-log">
+      {steps.map((entry, index) => (
+        <div className="steps-log-row" key={entry.id}>
+          <span className="steps-log-index">{index + 1}</span>
+          <span className="steps-log-text">{entry.text}</span>
         </div>
-      )}
+      ))}
+      <div ref={endRef} />
     </div>
   );
 }
@@ -672,8 +711,15 @@ function LoginPage({ onAuthenticated }) {
           className="text-input"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !busy) {
+              e.preventDefault();
+              checkUsername();
+            }
+          }}
           placeholder="Enter target site username"
           disabled={step === "register-password"}
+          autoFocus
         />
 
         {step === "username" && (
@@ -695,7 +741,14 @@ function LoginPage({ onAuthenticated }) {
               type="password"
               value={targetPassword}
               onChange={(e) => setTargetPassword(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !busy) {
+                  e.preventDefault();
+                  register();
+                }
+              }}
               placeholder="Password for target site"
+              autoFocus
             />
 
             <label>CREATE 4-DIGIT APP PIN</label>
@@ -754,6 +807,36 @@ function Dashboard({ sessionId, username, onLogout }) {
   const [otpAction, setOtpAction] = useState("");
   const [otpBusy, setOtpBusy] = useState(false);
   const [otpError, setOtpError] = useState("");
+
+  // Running log of every step the backend has reported for this dashboard
+  // session (login/OTP, punch in/out, WFH, ...). This is intentionally
+  // never cleared between actions -- it keeps accumulating so the user can
+  // scroll back through everything that happened this session -- and is
+  // only erased on logout (see logout() below).
+  const [stepsLog, setStepsLog] = useState([]);
+  const stepsLogIdRef = useRef(0);
+
+  const logStep = (text) => {
+    if (!text) return;
+    setStepsLog((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.text === text) return prev; // de-dupe consecutive repeats
+      stepsLogIdRef.current += 1;
+      return [...prev, { id: stepsLogIdRef.current, text }];
+    });
+  };
+
+  // Any time the live step/message changes, append it to the persistent
+  // steps log. Centralizing this here (instead of calling logStep at every
+  // call site that sets automationStep/automationMessage) guarantees the
+  // log always matches what LiveUpdates is showing.
+  useEffect(() => {
+    if (!automationStep && !automationMessage) return;
+    const text = automationStep && automationMessage
+      ? `${humanize(automationStep)}: ${automationMessage}`
+      : humanize(automationStep) || automationMessage;
+    logStep(text);
+  }, [automationStep, automationMessage]);
 
   // The background poller (below) reads this to avoid redundantly
   // re-triggering the OTP modal for a challenge that's already open/being
@@ -1039,8 +1122,53 @@ function Dashboard({ sessionId, username, onLogout }) {
     localStorage.removeItem("attendease_session");
     localStorage.removeItem("attendease_username");
 
+    // Erase the accumulated steps log on logout -- it must not persist
+    // into (or leak across) a new session.
+    setStepsLog([]);
+
     if (onLogout) onLogout();
   };
+
+  // Detect the backend going away (or the session becoming invalid) even
+  // while the dashboard is just sitting idle -- not only while an action is
+  // in flight. The poller above only runs during busyAction/otpBusy, so
+  // without this, a disconnected backend would leave the dashboard showing
+  // stale UI until the user next tried an action. This runs the whole time
+  // the dashboard is mounted and sends the user back to the login page as
+  // soon as the backend/session can't be confirmed.
+  const sessionCheckFailuresRef = useRef(0);
+
+  useEffect(() => {
+    if (!sessionId) return;
+
+    let stopped = false;
+
+    const checkSession = async () => {
+      try {
+        await api.getSessionStatus(sessionId);
+        sessionCheckFailuresRef.current = 0;
+      } catch (e) {
+        if (stopped) return;
+
+        // A single dropped request (a brief network blip) shouldn't be
+        // enough to boot the user -- require two consecutive failures
+        // (covers both a 404 "session gone" response and the backend being
+        // completely unreachable) before treating the session as invalid.
+        sessionCheckFailuresRef.current += 1;
+
+        if (sessionCheckFailuresRef.current >= 2) {
+          logout();
+        }
+      }
+    };
+
+    const interval = setInterval(checkSession, 7000);
+
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [sessionId]);
 
   return (
     <div className="dashboard-shell">
@@ -1052,10 +1180,9 @@ function Dashboard({ sessionId, username, onLogout }) {
             <div className="small-logo">
               <House size={18} />
             </div>
-            <span>AttendEase</span>
+            <span>InfoTIME</span>
           </div>
         </div>
-
         <div className="top-right">
           <span className="muted">English</span>
           <Bell size={20} />
@@ -1092,64 +1219,75 @@ function Dashboard({ sessionId, username, onLogout }) {
           </div>
         </div>
 
-        <h3 className="section-title">QUICK ACTIONS</h3>
+        <div className="dashboard-panels">
+          <section className="panel">
+            <h3 className="section-title">QUICK ACTIONS</h3>
 
-        <div className="action-grid">
-          <ActionCard
-            className="blue"
-            icon={<Clock3 />}
-            title="Punch In"
-            subtitle={
-              busyAction === "punch_in"
-                ? "Processing..."
-                : "Start shift"
-            }
-            disabled={Boolean(busyAction)}
-            onClick={() => action("punch_in")}
-          />
+            <div className="action-grid">
+              <ActionCard
+                className="blue"
+                icon={<Clock3 />}
+                title="Punch IN"
+                subtitle={
+                  busyAction === "punch_in"
+                    ? "Processing..."
+                    : "Start shift"
+                }
+                disabled={Boolean(busyAction)}
+                onClick={() => action("punch_in")}
+              />
 
-          <ActionCard
-            className="red"
-            icon={<LogOut />}
-            title="Punch Out"
-            subtitle={
-              busyAction === "punch_out"
-                ? "Processing..."
-                : "End shift"
-            }
-            disabled={Boolean(busyAction)}
-            onClick={() => action("punch_out")}
-          />
+              <ActionCard
+                className="red"
+                icon={<LogOut />}
+                title="Punch OUT"
+                subtitle={
+                  busyAction === "punch_out"
+                    ? "Processing..."
+                    : "End shift"
+                }
+                disabled={Boolean(busyAction)}
+                onClick={() => action("punch_out")}
+              />
 
-          <ActionCard
-            className="green"
-            icon={<House />}
-            title="Remote"
-            subtitle="Work from home"
-            disabled={Boolean(busyAction)}
-            onClick={() => setWfhOpen(true)}
-          />
+              <ActionCard
+                className="green"
+                icon={<House />}
+                title="WFH-Work From Home"
+                subtitle="Remote"
+                disabled={Boolean(busyAction)}
+                onClick={() => setWfhOpen(true)}
+              />
 
-          <ActionCard
-            className="purple"
-            icon={<CalendarDays />}
-            title="Leave"
-            subtitle="Request off"
-            disabled={Boolean(busyAction)}
-            onClick={() =>
-              setMessage(
-                "Leave can use the same LLM automation pattern."
-              )
-            }
-          />
+              <ActionCard
+                className="purple"
+                icon={<CalendarDays />}
+                title="Apply LEAVE"
+                subtitle="Request off"
+                disabled={Boolean(busyAction)}
+                onClick={() =>
+                  setMessage(
+                    "Leave can use the same LLM automation pattern."
+                  )
+                }
+              />
+            </div>
+          </section>
+
+          <section className="panel">
+            <h3 className="section-title">LIVE UPDATES</h3>
+
+            <LiveUpdates
+              status={automationStatus}
+              step={automationStep}
+              message={automationMessage}
+              error={error}
+            />
+
+            <h3 className="section-title steps-log-title">STEPS</h3>
+            <StepsLog steps={stepsLog} />
+          </section>
         </div>
-
-        <AutomationStatus
-          status={automationStatus}
-          step={automationStep}
-          message={automationMessage}
-          error={error}
-        />
 
         {message && (
           <div className="toast">
@@ -1239,8 +1377,10 @@ function ActionCard({
 
       <div className="card-top">
         <div className="icon-circle">{icon}</div>
-        <ArrowUpRight size={24} />
+        <ArrowUpRight size={24} className="card-arrow" />
       </div>
+
+      <div className="card-spacer" />
 
       <div className="card-copy">
         <strong>{title}</strong>
@@ -1259,6 +1399,56 @@ export default function App() {
     localStorage.getItem("attendease_username") || ""
   );
 
+  // A session ID sitting in localStorage only proves a session existed at
+  // some point -- it says nothing about whether the backend still
+  // recognizes it. The backend may have restarted, the session may have
+  // expired, or the backend may simply be unreachable (e.g. the dev server
+  // was stopped). Without checking, reopening the frontend would jump
+  // straight to the Dashboard with a session that silently fails on the
+  // first real action. `checkingSession` holds the Dashboard/Login decision
+  // until that's actually been confirmed against the backend.
+  const [checkingSession, setCheckingSession] = useState(
+    () => !!localStorage.getItem("attendease_session")
+  );
+
+  const clearStoredSession = () => {
+    localStorage.removeItem("attendease_session");
+    localStorage.removeItem("attendease_username");
+    setSessionId(null);
+    setUsername("");
+  };
+
+  useEffect(() => {
+    const storedSessionId = localStorage.getItem("attendease_session");
+
+    if (!storedSessionId) {
+      setCheckingSession(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    api
+      .getSessionStatus(storedSessionId)
+      .then(() => {
+        if (!cancelled) setCheckingSession(false);
+      })
+      .catch(() => {
+        // Covers both cases: the backend explicitly rejected the session
+        // (e.g. 404 / expired) and the backend being completely
+        // unreachable (network error, backend process not running).
+        // Either way there's no session to trust, so fall back to login.
+        if (!cancelled) {
+          clearStoredSession();
+          setCheckingSession(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleAuthenticated = (id, name) => {
     localStorage.setItem("attendease_session", id);
     localStorage.setItem("attendease_username", name);
@@ -1268,9 +1458,27 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    setSessionId(null);
-    setUsername("");
+    clearStoredSession();
   };
+
+  if (checkingSession) {
+    return (
+      <main className="auth-shell session-check">
+        <div className="brand-block">
+          <div className="logo-mark">
+            <House size={32} />
+          </div>
+          <h1>AttendEase</h1>
+          <p>Enterprise Attendance Suite</p>
+        </div>
+
+        <div className="session-check-status">
+          <Loader2 size={22} className="spin" />
+          <span>Checking session...</span>
+        </div>
+      </main>
+    );
+  }
 
   if (!sessionId) {
     return <LoginPage onAuthenticated={handleAuthenticated} />;

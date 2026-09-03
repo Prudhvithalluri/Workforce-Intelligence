@@ -2,8 +2,7 @@ import asyncio
 import json
 import logging
 
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+from openai import AzureOpenAI, APIError, APIConnectionError
 
 from config import settings
 from agent.prompts import SYSTEM_PROMPT, action_schema
@@ -24,314 +23,141 @@ logger.setLevel(logging.DEBUG)
 
 logger.info("==================================================")
 logger.info("LLM MODULE LOADED")
-logger.info("PROVIDER: AWS BEDROCK")
+logger.info("PROVIDER: AZURE OPENAI")
 logger.info("==================================================")
 
 
 # =========================================================
-# BEDROCK CLIENT
+# AZURE OPENAI CLIENT
 # =========================================================
 
-def _create_bedrock_client():
+def _create_azure_client() -> AzureOpenAI:
 
-    logger.info("Creating AWS Bedrock Runtime client")
+    logger.info("Creating Azure OpenAI client")
 
     logger.info(
-        "AWS_REGION=%s",
-        settings.AWS_REGION,
+        "AZURE_OPENAI_ENDPOINT=%s",
+        settings.AZURE_OPENAI_ENDPOINT,
     )
 
     logger.info(
-        "AWS_ACCESS_KEY_ID configured=%s",
-        bool(settings.AWS_ACCESS_KEY_ID.strip()),
+        "AZURE_OPENAI_API_KEY configured=%s",
+        bool(settings.AZURE_OPENAI_API_KEY.strip()),
     )
 
     logger.info(
-        "AWS_SECRET_ACCESS_KEY configured=%s",
-        bool(settings.AWS_SECRET_ACCESS_KEY.strip()),
+        "AZURE_OPENAI_API_VERSION=%s",
+        settings.AZURE_OPENAI_API_VERSION,
     )
 
-    logger.info(
-        "AWS_SESSION_TOKEN configured=%s",
-        bool(settings.AWS_SESSION_TOKEN.strip()),
-    )
-
-    client_kwargs = {
-        "service_name": "bedrock-runtime",
-        "region_name": settings.AWS_REGION,
-    }
-
-    if settings.AWS_ACCESS_KEY_ID.strip():
-
-        client_kwargs["aws_access_key_id"] = (
-            settings.AWS_ACCESS_KEY_ID
+    if not settings.AZURE_OPENAI_API_KEY.strip():
+        raise RuntimeError(
+            "AZURE_OPENAI_API_KEY is empty. Add it to backend/.env."
         )
 
-    if settings.AWS_SECRET_ACCESS_KEY.strip():
-
-        client_kwargs["aws_secret_access_key"] = (
-            settings.AWS_SECRET_ACCESS_KEY
+    if not settings.AZURE_OPENAI_ENDPOINT.strip():
+        raise RuntimeError(
+            "AZURE_OPENAI_ENDPOINT is empty. Add it to backend/.env."
         )
 
-    if settings.AWS_SESSION_TOKEN.strip():
-
-        client_kwargs["aws_session_token"] = (
-            settings.AWS_SESSION_TOKEN
-        )
-
-    client = boto3.client(
-        **client_kwargs
+    client = AzureOpenAI(
+        api_key=settings.AZURE_OPENAI_API_KEY,
+        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+        api_version=settings.AZURE_OPENAI_API_VERSION,
     )
 
-    logger.info(
-        "AWS Bedrock Runtime client created successfully"
-    )
+    logger.info("Azure OpenAI client created successfully")
 
     return client
 
 
-bedrock_client = _create_bedrock_client()
+azure_client = _create_azure_client()
 
 
 # =========================================================
-# BEDROCK INVOCATION
+# AZURE OPENAI INVOCATION
 # =========================================================
 
-def _invoke_bedrock(messages: list[dict]) -> str:
+def _invoke_azure_openai(messages: list[dict]) -> str:
 
     logger.info("--------------------------------------------------")
-    logger.info("BEDROCK INVOCATION START")
+    logger.info("AZURE OPENAI INVOCATION START")
     logger.info("--------------------------------------------------")
 
-    model_id = (
-        settings.BEDROCK_MODEL_ID.strip()
-    )
+    deployment = settings.AZURE_OPENAI_DEPLOYMENT.strip()
 
-    logger.info(
-        "BEDROCK_MODEL_ID=%s",
-        model_id,
-    )
+    logger.info("AZURE_OPENAI_DEPLOYMENT=%s", deployment)
 
-    logger.info(
-        "AWS_REGION=%s",
-        settings.AWS_REGION,
-    )
-
-    if not model_id:
-
-        logger.error(
-            "BEDROCK_MODEL_ID is EMPTY"
-        )
-
+    if not deployment:
+        logger.error("AZURE_OPENAI_DEPLOYMENT is EMPTY")
         raise RuntimeError(
-            "BEDROCK_MODEL_ID is empty. "
-            "Add your Bedrock model ID to backend/.env."
+            "AZURE_OPENAI_DEPLOYMENT is empty. "
+            "Add your Azure OpenAI deployment name to backend/.env."
         )
 
-    logger.info(
-        "Number of messages: %d",
-        len(messages),
-    )
+    logger.info("Number of messages: %d", len(messages))
 
-    # -----------------------------------------------------
-    # Build messages
-    # -----------------------------------------------------
-
-    system_messages = []
-
-    user_messages = []
-
+    # Azure OpenAI's chat completions API takes the same
+    # {"role": ..., "content": ...} shape already used by "messages" here,
+    # so no reshaping is needed (unlike the Bedrock converse() format).
     for message in messages:
-
-        role = message.get(
-            "role"
-        )
-
-        content = message.get(
-            "content",
-            "",
-        )
-
         logger.debug(
             "Message role=%s content_length=%d",
-            role,
-            len(content),
+            message.get("role"),
+            len(message.get("content", "")),
         )
 
-        if role == "system":
-
-            system_messages.append(
-                {
-                    "text": content
-                }
-            )
-
-        elif role == "user":
-
-            user_messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "text": content
-                        }
-                    ],
-                }
-            )
-
-        elif role == "assistant":
-
-            user_messages.append(
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "text": content
-                        }
-                    ],
-                }
-            )
-
-    # -----------------------------------------------------
-    # Bedrock request
-    # -----------------------------------------------------
-
-    request = {
-        "modelId": model_id,
-
-        "messages": user_messages,
-
-        "inferenceConfig": {
-            "temperature": 0,
-            "maxTokens": 1000,
-        },
-    }
-
-    if system_messages:
-
-        request["system"] = system_messages
-
-    logger.info(
-        "Calling bedrock_client.converse()"
-    )
-
-    logger.debug(
-        "Bedrock request modelId=%s",
-        model_id,
-    )
+    logger.info("Calling azure_client.chat.completions.create()")
 
     try:
-
-        response = (
-            bedrock_client.converse(
-                **request
-            )
+        response = azure_client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+            temperature=0,
+            max_tokens=1000,
         )
 
-    except ClientError as exc:
-
-        logger.exception(
-            "AWS ClientError while calling Bedrock"
-        )
-
+    except APIConnectionError as exc:
+        logger.exception("Azure OpenAI connection error")
         raise RuntimeError(
-            "AWS Bedrock ClientError: "
-            f"{exc}"
+            f"Azure OpenAI connection error: {exc}"
         ) from exc
 
-    except BotoCoreError as exc:
-
-        logger.exception(
-            "AWS BotoCoreError while calling Bedrock"
-        )
-
+    except APIError as exc:
+        logger.exception("Azure OpenAI API error")
         raise RuntimeError(
-            "AWS Bedrock BotoCoreError: "
-            f"{exc}"
+            f"Azure OpenAI API error: {exc}"
         ) from exc
 
     except Exception as exc:
-
-        logger.exception(
-            "Unexpected error while calling Bedrock"
-        )
-
+        logger.exception("Unexpected error while calling Azure OpenAI")
         raise RuntimeError(
-            "Unexpected Bedrock error: "
-            f"{exc}"
+            f"Unexpected Azure OpenAI error: {exc}"
         ) from exc
 
-    logger.info(
-        "Bedrock response received successfully"
-    )
+    logger.info("Azure OpenAI response received successfully")
 
     # -----------------------------------------------------
     # Extract output
     # -----------------------------------------------------
 
     try:
-
-        output = (
-            response[
-                "output"
-            ][
-                "message"
-            ][
-                "content"
-            ]
-        )
-
-    except (
-        KeyError,
-        TypeError,
-    ) as exc:
-
-        logger.exception(
-            "Could not extract text from Bedrock response"
-        )
-
+        content = response.choices[0].message.content or ""
+    except (KeyError, IndexError, AttributeError, TypeError) as exc:
+        logger.exception("Could not extract text from Azure OpenAI response")
         raise RuntimeError(
-            "Unexpected response received "
-            "from AWS Bedrock."
+            "Unexpected response received from Azure OpenAI."
         ) from exc
 
-    text_parts = []
+    content = content.strip()
 
-    for item in output:
-
-        if "text" in item:
-
-            text_parts.append(
-                item["text"]
-            )
-
-    content = "".join(
-        text_parts
-    ).strip()
-
-    logger.info(
-        "Bedrock response text length=%d",
-        len(content),
-    )
-
-    logger.debug(
-        "Bedrock response received length=%d",
-        len(content),
-    )
+    logger.info("Azure OpenAI response text length=%d", len(content))
 
     if not content:
+        logger.error("Azure OpenAI returned EMPTY response")
+        raise RuntimeError("Azure OpenAI returned an empty response.")
 
-        logger.error(
-            "Bedrock returned EMPTY response"
-        )
-
-        raise RuntimeError(
-            "AWS Bedrock returned an empty response."
-        )
-
-    logger.info(
-        "BEDROCK INVOCATION END"
-    )
+    logger.info("AZURE OPENAI INVOCATION END")
 
     return content
 
@@ -354,215 +180,93 @@ async def choose_action(
     # Configuration
     # -----------------------------------------------------
 
-    logger.info(
-        "Provider: AWS BEDROCK"
-    )
+    logger.info("Provider: AZURE OPENAI")
+    logger.info("Endpoint: %s", settings.AZURE_OPENAI_ENDPOINT)
+    logger.info("Deployment: %s", settings.AZURE_OPENAI_DEPLOYMENT)
+    logger.info("Available actions: %s", available_actions)
 
-    logger.info(
-        "Region: %s",
-        settings.AWS_REGION,
-    )
+    if not settings.AZURE_OPENAI_ENDPOINT.strip():
+        logger.error("AZURE_OPENAI_ENDPOINT is empty")
+        raise RuntimeError("AZURE_OPENAI_ENDPOINT is empty.")
 
-    logger.info(
-        "Model ID: %s",
-        settings.BEDROCK_MODEL_ID,
-    )
-
-    logger.info(
-        "Available actions: %s",
-        available_actions,
-    )
-
-    if not settings.AWS_REGION.strip():
-
-        logger.error(
-            "AWS_REGION is empty"
-        )
-
-        raise RuntimeError(
-            "AWS_REGION is empty."
-        )
-
-    if not settings.BEDROCK_MODEL_ID.strip():
-
-        logger.error(
-            "BEDROCK_MODEL_ID is empty"
-        )
-
-        raise RuntimeError(
-            "BEDROCK_MODEL_ID is empty."
-        )
+    if not settings.AZURE_OPENAI_DEPLOYMENT.strip():
+        logger.error("AZURE_OPENAI_DEPLOYMENT is empty")
+        raise RuntimeError("AZURE_OPENAI_DEPLOYMENT is empty.")
 
     # -----------------------------------------------------
     # Current state
     # -----------------------------------------------------
 
     payload = {
-
-        "operation": context.get(
-            "operation"
-        ),
-
-        "current_step": context.get(
-            "current_step"
-        ),
-
+        "operation": context.get("operation"),
+        "current_step": context.get("current_step"),
         # Location is deliberately NOT sent to the LLM.
         # It is frontend-supplied workflow data used only by Python/Playwright.
-
-        "last_verified_step": context.get(
-            "last_verified_step"
-        ),
-
-        "retry_count": context.get(
-            "retry_count",
-            0,
-        ),
-
-        "page_url": context.get(
-            "page_url"
-        ),
-
-        "page_title": context.get(
-            "page_title"
-        ),
-
-        "checks": context.get(
-            "checks",
-            {},
-        ),
-
-        "last_action": context.get(
-            "action"
-        ),
-
-        "last_action_result": context.get(
-            "action_result"
-        ),
-
-        "error": context.get(
-            "error"
-        ),
-
-        "recovery_reason": context.get(
-            "recovery_reason"
-        ),
+        "last_verified_step": context.get("last_verified_step"),
+        "retry_count": context.get("retry_count", 0),
+        "page_url": context.get("page_url"),
+        "page_title": context.get("page_title"),
+        "checks": context.get("checks", {}),
+        "last_action": context.get("action"),
+        "last_action_result": context.get("action_result"),
+        "error": context.get("error"),
+        "recovery_reason": context.get("recovery_reason"),
         "failed_action": context.get("failed_action"),
-
         "failed_step": context.get("failed_step"),
-
         "recovery_checks": context.get("recovery_checks", {}),
     }
 
-    logger.info(
-        "Current operation=%s",
-        payload["operation"],
-    )
-
-    logger.info(
-        "Current step=%s",
-        payload["current_step"],
-    )
-
-    logger.info(
-        "Last verified step=%s",
-        payload["last_verified_step"],
-    )
-
-    logger.info(
-        "Retry count=%s",
-        payload["retry_count"],
-    )
-
-    logger.info(
-        "Page URL=%s",
-        payload["page_url"],
-    )
+    logger.info("Current operation=%s", payload["operation"])
+    logger.info("Current step=%s", payload["current_step"])
+    logger.info("Last verified step=%s", payload["last_verified_step"])
+    logger.info("Retry count=%s", payload["retry_count"])
+    logger.info("Page URL=%s", payload["page_url"])
 
     if payload["error"]:
-
-        logger.warning(
-            "Workflow error=%s",
-            payload["error"],
-        )
+        logger.warning("Workflow error=%s", payload["error"])
 
     # -----------------------------------------------------
     # Build prompt
     # -----------------------------------------------------
 
     user_content = (
-        action_schema(
-            available_actions
-        )
+        action_schema(available_actions)
         + "\nCURRENT STATE:\n"
-        + json.dumps(
-            payload,
-            ensure_ascii=False,
-        )
+        + json.dumps(payload, ensure_ascii=False)
     )
 
     messages = [
-
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        },
-
-        {
-            "role": "user",
-            "content": user_content,
-        },
-
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
     ]
 
-    logger.info(
-        "LLM prompt prepared"
-    )
+    logger.info("LLM prompt prepared")
 
     # -----------------------------------------------------
-    # Call Bedrock
+    # Call Azure OpenAI
     # -----------------------------------------------------
 
-    logger.info(
-        "Sending request to AWS Bedrock..."
-    )
+    logger.info("Sending request to Azure OpenAI...")
 
     content = await asyncio.to_thread(
-        _invoke_bedrock,
+        _invoke_azure_openai,
         messages,
     )
 
-    logger.info(
-        "AWS Bedrock returned successfully"
-    )
+    logger.info("Azure OpenAI returned successfully")
 
     # -----------------------------------------------------
     # Clean response
     # -----------------------------------------------------
 
-    cleaned_content = (
-        content.strip()
-    )
+    cleaned_content = content.strip()
 
-    if cleaned_content.startswith(
-        "```"
-    ):
-
-        logger.debug(
-            "Removing markdown code fence from response"
-        )
-
+    if cleaned_content.startswith("```"):
+        logger.debug("Removing markdown code fence from response")
         cleaned_content = (
             cleaned_content
-            .replace(
-                "```json",
-                "",
-                1,
-            )
-            .replace(
-                "```",
-                "",
-            )
+            .replace("```json", "", 1)
+            .replace("```", "")
             .strip()
         )
 
@@ -571,70 +275,40 @@ async def choose_action(
     # -----------------------------------------------------
 
     try:
-
-        result = json.loads(
-            cleaned_content
-        )
+        result = json.loads(cleaned_content)
 
     except json.JSONDecodeError as exc:
-
-        logger.error(
-            "Invalid JSON returned by Bedrock"
-        )
-
-        logger.error("Bedrock response parsing failed length=%d", len(content))
-
+        logger.error("Invalid JSON returned by Azure OpenAI")
+        logger.error("Azure OpenAI response parsing failed length=%d", len(content))
         raise ValueError(
-            "AWS Bedrock returned invalid JSON: "
-            f"{content}"
+            f"Azure OpenAI returned invalid JSON: {content}"
         ) from exc
 
     # -----------------------------------------------------
     # Validate result
     # -----------------------------------------------------
 
-    if not isinstance(
-        result,
-        dict,
-    ):
+    if not isinstance(result, dict):
+        logger.error("Azure OpenAI result is not a JSON object")
+        raise ValueError("Azure OpenAI response must be a JSON object.")
 
-        logger.error(
-            "Bedrock result is not a JSON object"
-        )
+    action = result.get("action")
 
-        raise ValueError(
-            "AWS Bedrock response must be a JSON object."
-        )
-
-    action = result.get(
-        "action"
-    )
-
-    logger.info(
-        "LLM SELECTED ACTION: %s",
-        action,
-    )
+    logger.info("LLM SELECTED ACTION: %s", action)
 
     # -----------------------------------------------------
     # Validate action
     # -----------------------------------------------------
 
     if action not in available_actions:
-
         logger.error(
-            "LLM selected an action outside the allowed step: %s",
-            action,
+            "LLM selected an action outside the allowed step: %s", action
         )
-        logger.error(
-            "Allowed actions for this step: %s",
-            available_actions,
-        )
+        logger.error("Allowed actions for this step: %s", available_actions)
 
         # The candidate list is enforced by Python. If the model violates the
         # contract, never execute the invalid action. When exactly one action
         # is legal, it is unambiguous and safe to continue with that action.
-        # This prevents a model formatting/selection error from breaking a
-        # deterministic browser step such as app_authenticated -> open_site.
         if len(available_actions) == 1:
             fallback = available_actions[0]
             logger.warning(
@@ -650,17 +324,11 @@ async def choose_action(
             }
 
         raise ValueError(
-            "LLM selected invalid action: "
-            f"{action}. Available actions: {available_actions}"
+            f"LLM selected invalid action: {action}. "
+            f"Available actions: {available_actions}"
         )
 
-    logger.info(
-        "Valid LLM action selected: %s",
-        action,
-    )
-
-    logger.info(
-        "CHOOSE_ACTION COMPLETE"
-    )
+    logger.info("Valid LLM action selected: %s", action)
+    logger.info("CHOOSE_ACTION COMPLETE")
 
     return result
