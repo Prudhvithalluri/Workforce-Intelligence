@@ -88,35 +88,6 @@ async def register(
         )
 
 
-# ============================================================
-# APPLICATION LOGIN
-# ============================================================
-#
-# IMPORTANT:
-#
-# This endpoint ONLY:
-#
-#   1. Checks the user
-#   2. Verifies the 4-digit application PIN
-#   3. Creates an application session
-#   4. Returns the session ID
-#   5. Frontend moves to dashboard
-#
-# It MUST NOT:
-#
-#   - open Playwright
-#   - launch Chromium
-#   - open TARGET_SITE_URL
-#   - locate target-site username
-#   - enter target-site password
-#   - call the LLM
-#   - ask for target-site OTP
-#
-# Browser automation starts from /api/attendance/*
-# after the user clicks an action on the dashboard.
-#
-# ============================================================
-
 @router.post("/login")
 async def login(
     payload: LoginRequest,
@@ -291,29 +262,31 @@ async def verify_otp(
     # --------------------------------------------------------
 
     if interrupt_payload:
+        otp_invalid = bool(state.get("otp_invalid", False))
+
         return {
             "status": "otp_required",
             "session_id": payload.session_id,
+
             "otp_required": True,
             "otp_verified": False,
-            "otp_invalid": bool(state.get("otp_invalid", False)),
+            "otp_invalid": otp_invalid,
+
             "challenge_id": (
                 interrupt_payload.get("challenge_id")
                 or state.get("otp_challenge_id")
             ),
-            "current_step": (
-                state.get(
-                    "current_step"
-                )
-            ),
-            "last_verified_step": (
-                state.get(
-                    "last_verified_step"
-                )
-            ),
+
+            "current_step": state.get("current_step"),
+
+            "last_verified_step": state.get("last_verified_step"),
+
             "message": (
-                interrupt_payload.get(
-                    "message"
+                "The OTP is incorrect. Please enter the new OTP."
+                if otp_invalid
+                else interrupt_payload.get(
+                    "message",
+                    "Enter the OTP sent by the target website."
                 )
             ),
         }

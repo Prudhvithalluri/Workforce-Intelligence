@@ -808,6 +808,7 @@ function Dashboard({ sessionId, username, onLogout }) {
   const [otpBusy, setOtpBusy] = useState(false);
   const [otpError, setOtpError] = useState("");
 
+  const otpVerificationActiveRef = useRef(false);
   // Running log of every step the backend has reported for this dashboard
   // session (login/OTP, punch in/out, WFH, ...). This is intentionally
   // never cleared between actions -- it keeps accumulating so the user can
@@ -917,6 +918,7 @@ function Dashboard({ sessionId, username, onLogout }) {
   // OTP" button's disabled state also only takes effect after a re-render.
   const otpSubmitInFlightRef = useRef(false);
 
+
   const verifyAutomationOtp = async (otp) => {
     if (otpSubmitInFlightRef.current) return;
 
@@ -931,18 +933,18 @@ function Dashboard({ sessionId, username, onLogout }) {
       setOtpError("Enter a valid 6-digit OTP.");
       return;
     }
-
     otpSubmitInFlightRef.current = true;
+    otpVerificationActiveRef.current = true;
+
     setOtpBusy(true);
     setOtpError("");
 
     try {
-      // NOTE: the backend keeps running the SAME operation (punch in / punch
-      // out / work from home) to completion inside this single request once
-      // the OTP is accepted -- it does not stop at "OTP verified". The
-      // response therefore already reflects the real, final workflow status
-      // (e.g. "completed"), not just the OTP outcome.
-      const result = await api.verifyOtp(sessionId, otpChallengeId, cleanOtp);
+      const result = await api.verifyOtp(
+        sessionId,
+        otpChallengeId,
+        cleanOtp
+      );
 
       const challengeId =
         result?.challenge_id ||
@@ -950,28 +952,50 @@ function Dashboard({ sessionId, username, onLogout }) {
         result?.details?.challenge_id ||
         result?.details?.interrupt?.challenge_id;
 
+      /*
+       * OTP is still required / OTP was rejected.
+       * Keep the popup open.
+       */
       if (
         (result?.status === "waiting" ||
           result?.status === "otp_required" ||
           result?.status === "waiting_for_user") &&
         challengeId
       ) {
-        // The target site rejected the OTP (or asked for a new one).
-        // Keep the same modal open with the new/refreshed challenge.
         setOtpChallengeId(challengeId);
+
         setOtpError(
           result?.otp_invalid
             ? "That OTP was not accepted. Please enter the latest OTP."
             : "A new OTP was requested. Please enter it."
         );
+
         return;
       }
+      const otpVerified =
+        result?.otp_verified === true ||
+        result?.status === "otp_verified" ||
+        result?.status === "verified";
 
-      setOtpChallengeId(null);
-      setOtpAction("");
-      handleAutomationResult(result, otpAction || "attendance action", {
-        otpJustVerified: Boolean(result?.otp_verified),
-      });
+      if (otpVerified) {
+        // Close / hide OTP popup
+        setOtpChallengeId(null);
+
+        // Clear OTP-related state
+        setOtpAction("");
+        setOtpError("");
+      }
+
+      /*
+       * Continue with the normal automation result handling.
+       */
+      handleAutomationResult(
+        result,
+        otpAction || "attendance action",
+        {
+          otpJustVerified: otpVerified,
+        }
+      );
     } catch (e) {
       if (e.status === 404) {
         logout();
@@ -1062,11 +1086,9 @@ function Dashboard({ sessionId, username, onLogout }) {
         // poller (which runs concurrently with the OTP modal's own
         // /verify-otp call, via otpBusy) can see a stale "waiting" snapshot
         // still sitting in session.workflow from just before OTP was
-        // submitted, and redundantly reset the already-open OTP modal's
-        // state (action, error, status/step text) while the real
-        // verification is still in flight -- which is exactly the kind of
-        // "two popups fighting" glitch that shows up as the modal
-        // flickering/closing.
+        // submitted, and redundantly reopen/reset the modal that the user
+        // just successfully closed -- which is exactly the kind of "modal
+        // won't close" glitch this guard prevents.
         const isGenuinelyNewChallenge =
           statusChallengeId && statusChallengeId !== otpChallengeIdRef.current;
 
