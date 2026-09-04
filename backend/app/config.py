@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     # PLAYWRIGHT
     # =====================================================
 
-    PLAYWRIGHT_HEADLESS: bool = False
+    PLAYWRIGHT_HEADLESS: bool = True
     VIDEO_DIR: str = str(BASE_DIR / "session_recordings")
     VIDEO_WIDTH: int = 1280
     VIDEO_HEIGHT: int = 720

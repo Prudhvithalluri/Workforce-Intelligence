@@ -29,6 +29,18 @@ function humanize(text) {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+// Human-facing labels for the final "<X> successful!" message shown once an
+// action (punch in/out, WFH, ...) actually completes -- deliberately
+// hand-written per action rather than derived via humanize(actionName), so
+// wording stays natural. E.g. "work_from_home" would otherwise humanize to
+// "Work from home successful!", which reads worse than "Work from home
+// request submitted!".
+const ACTION_SUCCESS_LABELS = {
+  punch_in: "Punch in",
+  punch_out: "Punch out",
+  work_from_home: "Work from home request",
+};
+
 function getCurrentLocation() {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
@@ -564,7 +576,7 @@ function LoginPage({ onAuthenticated }) {
       const loggedInUsername =
         result.username || username.trim().toLowerCase();
 
-      localStorage.setItem("InfoTIME_username", loggedInUsername);
+      localStorage.setItem("attendease_username", loggedInUsername);
 
       if (
         result.status === "otp_required" ||
@@ -665,7 +677,7 @@ function LoginPage({ onAuthenticated }) {
           <div className="logo-mark">
             <House size={32} />
           </div>
-          <h1>InfoTIME</h1>
+          <h1>AttendEase</h1>
           <p>Enterprise Attendance Suite</p>
         </div>
 
@@ -700,7 +712,7 @@ function LoginPage({ onAuthenticated }) {
         <div className="logo-mark">
           <House size={32} />
         </div>
-        <h1>InfoTIME</h1>
+        <h1>AttendEase</h1>
         <p>Enterprise Attendance Suite</p>
       </div>
 
@@ -869,11 +881,22 @@ function Dashboard({ sessionId, username, onLogout }) {
     );
 
     // The OTP challenge is only ever solved once per browser session. When
-    // this result is the direct continuation of an OTP submission, make
-    // that success explicit before showing however far the workflow got
-    // (e.g. straight through to "Punch in confirmed").
+    // this result is the direct continuation of an OTP submission, the user
+    // just watched a "verify OTP" form -- but what they actually care about
+    // is whether their punch in/out (or WFH request) went through, not that
+    // an OTP was verified along the way. So once the workflow has actually
+    // finished, replace the message with a clean, action-specific success
+    // line instead of surfacing "OTP verified..." as the headline result.
     if (otpJustVerified) {
-      backendMessage = `OTP verified. ${backendMessage}`;
+      if (status === "completed" || status === "success") {
+        backendMessage = `${ACTION_SUCCESS_LABELS[actionName] || humanize(actionName) || "Action"} successful!`;
+      } else if (status !== "failed" && status !== "error") {
+        // Workflow is still continuing past the OTP step (e.g. more
+        // automation steps left to run) -- say so, but don't claim final
+        // success yet, and don't bury the backend's own failure message
+        // under OTP wording if something goes wrong instead.
+        backendMessage = `OTP verified. ${backendMessage}`;
+      }
     }
 
     setAutomationStatus(status);
@@ -1098,7 +1121,7 @@ function Dashboard({ sessionId, username, onLogout }) {
           result?.status === "waiting_for_user";
 
         if (isWaitingStatus && isGenuinelyNewChallenge) {
-          console.info("[InfoTIME] OTP requested by backend; opening OTP popup");
+          console.info("[AttendEase] OTP requested by backend; opening OTP popup");
           setOtpChallengeId(statusChallengeId);
           setOtpAction(result.operation || "attendance action");
           setOtpError("");
@@ -1124,12 +1147,28 @@ function Dashboard({ sessionId, username, onLogout }) {
         // dashboard and the popup should close.
         if (otpChallengeIdRef.current && !isWaitingStatus) {
           console.info(
-            "[InfoTIME] Backend status reached '%s'; closing OTP popup",
+            "[AttendEase] Backend status reached '%s'; closing OTP popup",
             result?.status
           );
+
+          const closingAction = otpAction || result.operation || "attendance action";
+
           setOtpChallengeId(null);
           setOtpAction("");
           setOtpError("");
+
+          // Route through the same "<X> successful!" labeling as the direct
+          // /verify-otp response (see processAutomationResult) instead of
+          // falling through to the raw step/message setters below -- that
+          // raw text can still be OTP-flavored ("OTP verified
+          // successfully.", "otp_verified_target_site_dashboard_reached")
+          // if the backend snapshot caught here doesn't carry a fresh
+          // action_result. The user cares that the punch in/out or WFH
+          // request went through, not that an OTP was involved.
+          processAutomationResult(result, closingAction, {
+            otpJustVerified: true,
+          });
+          return;
         }
 
         if (result.step || result.current_step) {
@@ -1145,7 +1184,7 @@ function Dashboard({ sessionId, username, onLogout }) {
         }
       } catch (e) {
         if (e.status === 404) {
-          console.warn("[InfoTIME] Session is no longer available on this backend instance");
+          console.warn("[AttendEase] Session is no longer available on this backend instance");
           return;
         }
 
@@ -1164,8 +1203,8 @@ function Dashboard({ sessionId, username, onLogout }) {
   }, [sessionId, busyAction, otpBusy]);
 
   const logout = () => {
-    localStorage.removeItem("InfoTIME_session");
-    localStorage.removeItem("InfoTIME_username");
+    localStorage.removeItem("attendease_session");
+    localStorage.removeItem("attendease_username");
 
     // Erase the accumulated steps log on logout -- it must not persist
     // into (or leak across) a new session.
@@ -1437,11 +1476,11 @@ function ActionCard({
 
 export default function App() {
   const [sessionId, setSessionId] = useState(() =>
-    localStorage.getItem("InfoTIME_session")
+    localStorage.getItem("attendease_session")
   );
 
   const [username, setUsername] = useState(() =>
-    localStorage.getItem("InfoTIME_username") || ""
+    localStorage.getItem("attendease_username") || ""
   );
 
   // A session ID sitting in localStorage only proves a session existed at
@@ -1453,18 +1492,18 @@ export default function App() {
   // first real action. `checkingSession` holds the Dashboard/Login decision
   // until that's actually been confirmed against the backend.
   const [checkingSession, setCheckingSession] = useState(
-    () => !!localStorage.getItem("InfoTIME_session")
+    () => !!localStorage.getItem("attendease_session")
   );
 
   const clearStoredSession = () => {
-    localStorage.removeItem("InfoTIME_session");
-    localStorage.removeItem("InfoTIME_username");
+    localStorage.removeItem("attendease_session");
+    localStorage.removeItem("attendease_username");
     setSessionId(null);
     setUsername("");
   };
 
   useEffect(() => {
-    const storedSessionId = localStorage.getItem("InfoTIME_session");
+    const storedSessionId = localStorage.getItem("attendease_session");
 
     if (!storedSessionId) {
       setCheckingSession(false);
@@ -1495,8 +1534,8 @@ export default function App() {
   }, []);
 
   const handleAuthenticated = (id, name) => {
-    localStorage.setItem("InfoTIME_session", id);
-    localStorage.setItem("InfoTIME_username", name);
+    localStorage.setItem("attendease_session", id);
+    localStorage.setItem("attendease_username", name);
 
     setSessionId(id);
     setUsername(name);
@@ -1513,7 +1552,7 @@ export default function App() {
           <div className="logo-mark">
             <House size={32} />
           </div>
-          <h1>InfoTIME</h1>
+          <h1>AttendEase</h1>
           <p>Enterprise Attendance Suite</p>
         </div>
 
