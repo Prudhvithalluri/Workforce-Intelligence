@@ -564,7 +564,7 @@ function LoginPage({ onAuthenticated }) {
       const loggedInUsername =
         result.username || username.trim().toLowerCase();
 
-      localStorage.setItem("attendease_username", loggedInUsername);
+      localStorage.setItem("InfoTIME_username", loggedInUsername);
 
       if (
         result.status === "otp_required" ||
@@ -665,7 +665,7 @@ function LoginPage({ onAuthenticated }) {
           <div className="logo-mark">
             <House size={32} />
           </div>
-          <h1>AttendEase</h1>
+          <h1>InfoTIME</h1>
           <p>Enterprise Attendance Suite</p>
         </div>
 
@@ -700,7 +700,7 @@ function LoginPage({ onAuthenticated }) {
         <div className="logo-mark">
           <House size={32} />
         </div>
-        <h1>AttendEase</h1>
+        <h1>InfoTIME</h1>
         <p>Enterprise Attendance Suite</p>
       </div>
 
@@ -1092,13 +1092,13 @@ function Dashboard({ sessionId, username, onLogout }) {
         const isGenuinelyNewChallenge =
           statusChallengeId && statusChallengeId !== otpChallengeIdRef.current;
 
-        if (
-          (result?.status === "waiting" ||
-            result?.status === "otp_required" ||
-            result?.status === "waiting_for_user") &&
-          isGenuinelyNewChallenge
-        ) {
-          console.info("[AttendEase] OTP requested by backend; opening OTP popup");
+        const isWaitingStatus =
+          result?.status === "waiting" ||
+          result?.status === "otp_required" ||
+          result?.status === "waiting_for_user";
+
+        if (isWaitingStatus && isGenuinelyNewChallenge) {
+          console.info("[InfoTIME] OTP requested by backend; opening OTP popup");
           setOtpChallengeId(statusChallengeId);
           setOtpAction(result.operation || "attendance action");
           setOtpError("");
@@ -1107,6 +1107,29 @@ function Dashboard({ sessionId, username, onLogout }) {
           setAutomationMessage(
             result.message || "Enter the OTP you received by email."
           );
+        }
+
+        // Close the OTP popup purely off the polled backend status, as a
+        // safety net independent of the /verify-otp response handling in
+        // verifyAutomationOtp. This poller runs concurrently with that
+        // request (via otpBusy) -- if the backend has already moved the
+        // workflow PAST the OTP step (status is no longer one of the
+        // waiting states: it reached "completed"/"success", is "running"
+        // the rest of the flow, or "failed") while a popup is still open,
+        // the challenge has been resolved server-side and the popup would
+        // otherwise be left stuck open on stale state. This covers the
+        // case where the direct /verify-otp response is slow, dropped, or
+        // doesn't carry an explicit otp_verified flag for some reason --
+        // the polled status alone is enough to know we're back at the
+        // dashboard and the popup should close.
+        if (otpChallengeIdRef.current && !isWaitingStatus) {
+          console.info(
+            "[InfoTIME] Backend status reached '%s'; closing OTP popup",
+            result?.status
+          );
+          setOtpChallengeId(null);
+          setOtpAction("");
+          setOtpError("");
         }
 
         if (result.step || result.current_step) {
@@ -1122,7 +1145,7 @@ function Dashboard({ sessionId, username, onLogout }) {
         }
       } catch (e) {
         if (e.status === 404) {
-          console.warn("[AttendEase] Session is no longer available on this backend instance");
+          console.warn("[InfoTIME] Session is no longer available on this backend instance");
           return;
         }
 
@@ -1141,8 +1164,8 @@ function Dashboard({ sessionId, username, onLogout }) {
   }, [sessionId, busyAction, otpBusy]);
 
   const logout = () => {
-    localStorage.removeItem("attendease_session");
-    localStorage.removeItem("attendease_username");
+    localStorage.removeItem("InfoTIME_session");
+    localStorage.removeItem("InfoTIME_username");
 
     // Erase the accumulated steps log on logout -- it must not persist
     // into (or leak across) a new session.
@@ -1414,11 +1437,11 @@ function ActionCard({
 
 export default function App() {
   const [sessionId, setSessionId] = useState(() =>
-    localStorage.getItem("attendease_session")
+    localStorage.getItem("InfoTIME_session")
   );
 
   const [username, setUsername] = useState(() =>
-    localStorage.getItem("attendease_username") || ""
+    localStorage.getItem("InfoTIME_username") || ""
   );
 
   // A session ID sitting in localStorage only proves a session existed at
@@ -1430,18 +1453,18 @@ export default function App() {
   // first real action. `checkingSession` holds the Dashboard/Login decision
   // until that's actually been confirmed against the backend.
   const [checkingSession, setCheckingSession] = useState(
-    () => !!localStorage.getItem("attendease_session")
+    () => !!localStorage.getItem("InfoTIME_session")
   );
 
   const clearStoredSession = () => {
-    localStorage.removeItem("attendease_session");
-    localStorage.removeItem("attendease_username");
+    localStorage.removeItem("InfoTIME_session");
+    localStorage.removeItem("InfoTIME_username");
     setSessionId(null);
     setUsername("");
   };
 
   useEffect(() => {
-    const storedSessionId = localStorage.getItem("attendease_session");
+    const storedSessionId = localStorage.getItem("InfoTIME_session");
 
     if (!storedSessionId) {
       setCheckingSession(false);
@@ -1472,8 +1495,8 @@ export default function App() {
   }, []);
 
   const handleAuthenticated = (id, name) => {
-    localStorage.setItem("attendease_session", id);
-    localStorage.setItem("attendease_username", name);
+    localStorage.setItem("InfoTIME_session", id);
+    localStorage.setItem("InfoTIME_username", name);
 
     setSessionId(id);
     setUsername(name);
@@ -1490,7 +1513,7 @@ export default function App() {
           <div className="logo-mark">
             <House size={32} />
           </div>
-          <h1>AttendEase</h1>
+          <h1>InfoTIME</h1>
           <p>Enterprise Attendance Suite</p>
         </div>
 

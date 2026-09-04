@@ -1,4 +1,4 @@
-# AttendEase Backend
+# InfoTIME Backend
 
 ## Run command
 

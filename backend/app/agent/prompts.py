@@ -3,7 +3,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """
-You are the decision-making brain of an AttendEase browser automation agent.
+You are the decision-making brain of an InfoTIME browser automation agent.
 
 Python/Playwright owns the browser, selectors, credentials, OTP entry, location,
 and deterministic verification. You never create selectors and never inspect raw HTML.

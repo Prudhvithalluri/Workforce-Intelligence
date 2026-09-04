@@ -86,7 +86,7 @@ button { cursor: pointer; }
    instead. Cleared only on logout (see Dashboard.logout in App.jsx). */
 .steps-log-title { margin-top:clamp(14px,2.2vh,26px); flex:0 0 auto; }
 .steps-log {
-  flex:1 1 auto; min-height:0; max-height:260px; overflow-y:auto;
+  flex:0 0 260px; height:260px; flex-shrink:0; overflow-y:auto;
   display:flex; flex-direction:column; gap:7px;
   background:#0e1729; border:1px solid #1f2942; border-radius:16px;
   padding:12px 14px; font-size:13px; color:#c7d2fe;
@@ -257,7 +257,7 @@ button { cursor: pointer; }
   .panel { min-height: auto; }
   .panel .section-title { margin-top: 4px; }
   .steps-log-title { margin-top: 16px; }
-  .steps-log { max-height: 160px; }
+  .steps-log { flex: 0 0 160px; height: 160px; }
 
   /* Keep the 2x2 grid on mobile (not 1 column) — a 4-row stack cannot fit
      one phone screen. Cards size themselves via the flex-based action-grid

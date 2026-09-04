@@ -43,7 +43,7 @@ from routers.wfh import router as wfh_router
 # =========================================================
 
 app = FastAPI(
-    title="AttendEase LangGraph Backend"
+    title="InfoTIME LangGraph Backend"
 )
 
 
